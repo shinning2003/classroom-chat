@@ -13,7 +13,7 @@ from flask import Flask, jsonify, request, session, current_app, g
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import generate_password_hash, check_password_hash
 
-socketio = SocketIO(async_mode='eventlet')
+socketio = SocketIO()
 
 
 def create_app(config=None):
