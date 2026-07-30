@@ -1861,3 +1861,6 @@ def _user_rank(conn, user_id):
         "(SELECT points FROM users WHERE id=?)",
         (user_id,)).fetchone()
     return row[0] if row else None
+
+# Module-level WSGI app for gunicorn (start command: -k eventlet app:app)
+app = create_app()
