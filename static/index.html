@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>Whisper Room</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0a0f1a;--surface:#111827;--surface2:#1a2332;--accent:#00d4ff;--accent-glow:#00d4ff33;--text:#e2e8f0;--muted:#64748b;--border:#1e293b;--radius:10px;--danger:#ef4444;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
+.hidden{display:none!important}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:10px 20px;border-radius:var(--radius);border:none;cursor:pointer;font-size:14px;font-weight:600;transition:.15s}
+.btn-primary{background:var(--accent);color:#0a0f1a}.btn-primary:hover{box-shadow:0 0 16px var(--accent-glow)}
+.btn-ghost{background:var(--surface2);color:var(--text);border:1px solid var(--border)}.btn-ghost:hover{background:var(--border)}
+.btn-sm{padding:6px 12px;font-size:12px}
+.btn-danger{background:var(--danger);color:#fff}
+input,textarea{width:100%;padding:10px 12px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;outline:none;transition:.15s}
+input:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-glow)}
+textarea{resize:vertical;min-height:60px;font-family:inherit}
+
+/* Auth screen */
+#auth-screen{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+#auth-screen h1{font-size:28px;margin-bottom:4px;background:linear-gradient(135deg,var(--accent),#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+#auth-screen p.sub{color:var(--muted);margin-bottom:24px;font-size:14px}
+.auth-card{width:100%;max-width:380px;background:var(--surface);border-radius:16px;padding:24px;border:1px solid var(--border)}
+.auth-card h2{font-size:18px;margin-bottom:16px}
+.auth-card input{margin-bottom:10px}
+.auth-card .btn{width:100%;justify-content:center;margin-top:6px}
+.auth-toggle{text-align:center;margin-top:12px;font-size:13px;color:var(--muted)}
+.auth-toggle a{color:var(--accent);cursor:pointer;text-decoration:none}
+
+/* App layout */
+#app{flex:1;display:flex;flex-direction:column;height:100vh}
+#app-header{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 16px;display:flex;align-items:center;justify-content:space-between}
+#app-header h2{font-size:17px;display:flex;align-items:center;gap:8px}
+#app-header .user-info{font-size:12px;color:var(--muted)}
+#main-content{flex:1;overflow-y:auto;padding:12px 12px 72px}
+#bottom-nav{position:fixed;bottom:0;left:0;right:0;background:var(--surface);border-top:1px solid var(--border);display:flex;z-index:100}
+.nav-item{flex:1;text-align:center;padding:8px 0;font-size:11px;color:var(--muted);cursor:pointer;transition:.1s}
+.nav-item.active{color:var(--accent)}
+.nav-item svg{display:block;margin:0 auto 2px}
+
+/* Feed */
+.rumor-card{background:var(--surface);border-radius:var(--radius);border:1px solid var(--border);padding:14px;margin-bottom:10px}
+.rumor-card .meta{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:6px}
+.rumor-card .handle{color:var(--accent);font-weight:600}
+.rumor-card .text{font-size:14px;line-height:1.5;margin-bottom:8px;word-break:break-word}
+.rumor-card .actions{display:flex;gap:8px;font-size:12px}
+.rumor-card .actions span{cursor:default;color:var(--muted)}
+.rumor-card.highlighted{border-color:var(--accent);box-shadow:0 0 8px var(--accent-glow)}
+.rumor-card .tags{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px}
+.rumor-card .tag{font-size:11px;background:var(--surface2);padding:2px 8px;border-radius:20px;color:var(--muted)}
+.rumor-card .badge{font-size:11px;padding:1px 6px;border-radius:10px;background:var(--accent);color:#0a0f1a;margin-left:6px}
+.rumor-card .is-new{color:#22c55e;font-size:10px;margin-left:4px}
+
+/* Compose */
+#compose-area{padding:10px 0}
+#compose-area textarea{margin-bottom:8px}
+#compose-area .compose-tags{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
+.tag-chip{font-size:12px;background:var(--surface2);padding:3px 10px;border-radius:20px;border:1px solid var(--border);cursor:pointer}
+.tag-chip.active{background:var(--accent);color:#0a0f1a;border-color:var(--accent)}
+
+/* Tabs content */
+.tab-content{display:none}
+.tab-content.active{display:block}
+
+/* Profile */
+.profile-card{background:var(--surface);border-radius:var(--radius);padding:16px;border:1px solid var(--border);margin-bottom:10px}
+.profile-card .stat-row{display:flex;justify-content:space-around;margin:12px 0}
+.profile-card .stat{text-align:center}
+.profile-card .stat .num{font-size:22px;font-weight:700;color:var(--accent)}
+.profile-card .stat .label{font-size:11px;color:var(--muted)}
+.badge-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.badge-item{font-size:12px;background:var(--surface2);padding:4px 10px;border-radius:20px;border:1px solid var(--border)}
+
+/* Shop */
+.shop-item{background:var(--surface);border-radius:var(--radius);padding:14px;border:1px solid var(--border);margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
+.shop-item .info{flex:1}
+.shop-item .title{font-weight:600;font-size:14px}
+.shop-item .desc{font-size:12px;color:var(--muted)}
+.shop-item .price{font-size:14px;font-weight:700;color:var(--accent)}
+
+/* Leaderboard */
+.lb-entry{display:flex;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);font-size:14px}
+.lb-entry .rank{width:32px;font-weight:700;color:var(--accent)}
+.lb-entry .alias{flex:1}
+.lb-entry .pts{color:var(--muted);font-size:12px}
+.lb-entry.is-me{color:var(--accent)}
+.lb-entry.featured .alias::after{content:" ★";color:var(--accent)}
+
+/* Challenges */
+.challenge{background:var(--surface);border-radius:var(--radius);padding:14px;border:1px solid var(--border);margin-bottom:8px}
+.challenge .head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.challenge .head h4{font-size:14px}
+.challenge .progress-bar{height:6px;background:var(--surface2);border-radius:3px;overflow:hidden;margin:6px 0}
+.challenge .progress-bar .fill{height:100%;background:var(--accent);border-radius:3px;transition:.3s}
+
+/* Modal overlay */
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200;padding:24px}
+.modal{background:var(--surface);border-radius:16px;padding:24px;width:100%;max-width:400px;border:1px solid var(--border);max-height:80vh;overflow-y:auto}
+
+/* Toast */
+.toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--accent);padding:10px 20px;border-radius:var(--radius);z-index:300;font-size:14px;box-shadow:0 4px 20px rgba(0,0,0,.4);animation:fadeIn .2s}
+.toast.error{border-color:var(--danger)}
+@keyframes fadeIn{from{opacity:0;transform:translateX(-50%) translateY(-8px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+
+/* Tags tab */
+.tag-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
+.tag-row .name{font-size:14px}
+.tag-row .count{font-size:12px;color:var(--muted)}
+.tag-row .follow-btn{font-size:12px}
+
+/* Sort bar */
+.sort-bar{display:flex;gap:6px;margin-bottom:10px;overflow-x:auto;padding:2px 0}
+.sort-btn{font-size:12px;padding:4px 12px;border-radius:20px;background:var(--surface2);border:1px solid var(--border);cursor:pointer;white-space:nowrap;color:var(--muted)}
+.sort-btn.active{background:var(--accent);color:#0a0f1a;border-color:var(--accent)}
+
+.empty-state{text-align:center;color:var(--muted);padding:40px 20px;font-size:14px}
+.loading{text-align:center;padding:20px;color:var(--muted)}
+
+/* Badge selector */
+.badge-select{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.badge-opt{padding:6px 12px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:12px;background:var(--surface2)}
+.badge-opt.selected{border-color:var(--accent);background:var(--accent);color:#0a0f1a}
+</style>
+</head>
+<body>
+
+<div id="auth-screen">
+  <h1>Whisper Room</h1>
+  <p class="sub">Anonymous confessions. Real accountability.</p>
+  <div class="auth-card" id="login-form">
+    <h2>Sign In</h2>
+    <input type="text" id="login-id" placeholder="Email or handle" autocomplete="username">
+    <input type="password" id="login-pass" placeholder="Password" autocomplete="current-password">
+    <button class="btn btn-primary" onclick="login()">Sign In</button>
+    <div class="auth-toggle">Don't have an account? <a onclick="showRegister()">Register</a></div>
+    <div class="auth-toggle" style="margin-top:4px"><a onclick="showForgot()">Forgot password?</a></div>
+  </div>
+  <div class="auth-card hidden" id="register-form">
+    <h2>Register</h2>
+    <input type="text" id="reg-name" placeholder="Real name">
+    <input type="email" id="reg-email" placeholder="Email">
+    <input type="text" id="reg-handle" placeholder="Public handle (3-20 chars)">
+    <input type="password" id="reg-pass" placeholder="Password (min 4 chars)">
+    <button class="btn btn-primary" onclick="register()">Create Account</button>
+    <div class="auth-toggle">Already registered? <a onclick="showLogin()">Sign In</a></div>
+  </div>
+  <div class="auth-card hidden" id="forgot-form">
+    <h2>Forgot Password</h2>
+    <input type="text" id="forgot-handle" placeholder="Your handle">
+    <button class="btn btn-primary" onclick="forgotPassword()">Request Reset</button>
+    <div class="auth-toggle"><a onclick="showLogin()">Back to Sign In</a></div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <div id="app-header">
+    <h2>💬 Whisper Room</h2>
+    <div class="user-info">
+      <span id="header-handle"></span>
+      <span style="margin:0 6px;color:var(--muted)">·</span>
+      <span id="header-pts" style="color:var(--accent)"></span>
+      <span style="margin:0 6px;color:var(--muted)">|</span>
+      <a style="color:var(--muted);cursor:pointer;font-size:12px" onclick="logout()">logout</a>
+    </div>
+  </div>
+  <div id="main-content">
+    <!-- Feed tab -->
+    <div class="tab-content active" id="tab-feed">
+      <div id="compose-area">
+        <textarea id="compose-text" placeholder="Drop a whisper…" maxlength="500"></textarea>
+        <div class="compose-tags" id="compose-tags">
+          <span class="tag-chip" data-tag="confession">#confession</span>
+          <span class="tag-chip" data-tag="joke">#joke</span>
+          <span class="tag-chip" data-tag="crush">#crush</span>
+          <span class="tag-chip" data-tag="rant">#rant</span>
+          <span class="tag-chip" data-tag="question">#question</span>
+          <span class="tag-chip" data-tag="advice">#advice</span>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="postRumor()">💬 Whisper</button>
+      </div>
+      <div class="sort-bar" id="sort-bar">
+        <span class="sort-btn active" data-sort="new">New</span>
+        <span class="sort-btn" data-sort="hot">Hot</span>
+        <span class="sort-btn" data-sort="rising">Rising</span>
+        <span class="sort-btn" id="filter-followed" data-filter="followed">Followed</span>
+      </div>
+      <div id="feed"></div>
+    </div>
+    <!-- Tags tab -->
+    <div class="tab-content" id="tab-tags">
+      <h3 style="margin-bottom:10px;font-size:16px">🏷️ Tags</h3>
+      <div id="tags-list"></div>
+    </div>
+    <!-- Leaderboard tab -->
+    <div class="tab-content" id="tab-leaderboard">
+      <h3 style="margin-bottom:10px;font-size:16px">🏆 Leaderboard</h3>
+      <div id="leaderboard"></div>
+      <h3 style="margin:16px 0 10px;font-size:16px">🎯 Challenges</h3>
+      <div id="challenges"></div>
+    </div>
+    <!-- Profile/Shop tab -->
+    <div class="tab-content" id="tab-profile">
+      <h3 style="margin-bottom:10px;font-size:16px">👤 Profile</h3>
+      <div id="profile-area"></div>
+      <h3 style="margin:16px 0 10px;font-size:16px">🏪 Shop</h3>
+      <div id="shop"></div>
+    </div>
+  </div>
+  <div id="bottom-nav">
+    <div class="nav-item active" data-tab="feed">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      Feed
+    </div>
+    <div class="nav-item" data-tab="tags">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+      Tags
+    </div>
+    <div class="nav-item" data-tab="leaderboard">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5C7 4 6 9 6 9z"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5C17 4 18 9 18 9z"/><path d="M4 22h16"/><path d="M10 22V2h4v20"/><path d="M6 14v-3"/><path d="M18 14v-3"/></svg>
+      Top
+    </div>
+    <div class="nav-item" data-tab="profile">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      Me
+    </div>
+  </div>
+</div>
+
+<script>
+let state = { user: null, currentSort: 'new', currentFilter: '', currentTag: '' };
+
+function $(id){return document.getElementById(id)}
+
+function toast(msg, isError){
+  const el = document.createElement('div');
+  el.className = 'toast' + (isError ? ' error' : '');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2500);
+}
+
+async function api(method, path, body){
+  const opts = { method, headers: {} };
+  if(body){ opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const r = await fetch(path, opts);
+  const data = await r.json();
+  if(!r.ok){ throw new Error(data.error || `HTTP ${r.status}`); }
+  return data;
+}
+
+/* Auth */
+function showRegister(){ $('login-form').classList.add('hidden'); $('register-form').classList.remove('hidden'); $('forgot-form').classList.add('hidden'); }
+function showLogin(){ $('login-form').classList.remove('hidden'); $('register-form').classList.add('hidden'); $('forgot-form').classList.add('hidden'); }
+function showForgot(){ $('login-form').classList.add('hidden'); $('register-form').classList.add('hidden'); $('forgot-form').classList.remove('hidden'); }
+
+async function register(){
+  try {
+    const d = await api('POST', '/api/register', {
+      real_name: $('reg-name').value.trim(),
+      email: $('reg-email').value.trim(),
+      handle: $('reg-handle').value.trim(),
+      password: $('reg-pass').value
+    });
+    toast('Registered!');
+    enterApp(d.handle);
+  } catch(e){ toast(e.message, true); }
+}
+
+async function login(){
+  try {
+    const d = await api('POST', '/api/login', {
+      identifier: $('login-id').value.trim(),
+      password: $('login-pass').value
+    });
+    enterApp(d.handle);
+  } catch(e){ toast(e.message, true); }
+}
+
+async function forgotPassword(){
+  try {
+    const d = await api('POST', '/api/forgot-password', { handle: $('forgot-handle').value.trim() });
+    toast(d.message);
+    showLogin();
+  } catch(e){ toast(e.message, true); }
+}
+
+function logout(){
+  state.user = null;
+  $('app').classList.add('hidden');
+  $('auth-screen').classList.remove('hidden');
+  $('login-id').value = '';
+  $('login-pass').value = '';
+}
+
+async function enterApp(handle){
+  $('auth-screen').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  $('header-handle').textContent = '@' + handle;
+  loadProfile();
+  loadFeed();
+  loadTags();
+  loadLeaderboard();
+}
+
+/* Navigation */
+document.querySelectorAll('.nav-item').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('active'));
+    el.classList.add('active');
+    document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
+    $(`tab-${el.dataset.tab}`).classList.add('active');
+    if(el.dataset.tab === 'feed') loadFeed();
+    if(el.dataset.tab === 'tags') loadTags();
+    if(el.dataset.tab === 'leaderboard') { loadLeaderboard(); loadChallenges(); }
+    if(el.dataset.tab === 'profile') { loadProfile(); loadShop(); }
+  });
+});
+
+/* Sort */
+document.querySelectorAll('.sort-btn').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.sort-btn').forEach(x => x.classList.remove('active'));
+    el.classList.add('active');
+    if(el.dataset.sort){ state.currentSort = el.dataset.sort; state.currentFilter = ''; state.currentTag = ''; }
+    if(el.dataset.filter){ state.currentFilter = el.dataset.filter; state.currentSort = ''; state.currentTag = ''; }
+    loadFeed();
+  });
+});
+
+/* Compose tags */
+const selectedTags = new Set();
+document.querySelectorAll('.tag-chip').forEach(el => {
+  el.addEventListener('click', () => {
+    el.classList.toggle('active');
+    const tag = el.dataset.tag;
+    if(selectedTags.has(tag)) selectedTags.delete(tag); else selectedTags.add(tag);
+  });
+});
+
+/* Feed */
+async function loadFeed(){
+  const el = $('feed');
+  el.innerHTML = '<div class="loading">Loading whispers…</div>';
+  try {
+    let url = '/api/rumors?sort=' + state.currentSort;
+    if(state.currentFilter) url += '&filter=' + state.currentFilter;
+    if(state.currentTag) url += '&tag=' + state.currentTag;
+    const d = await api('GET', url);
+    if(!d.rumors || d.rumors.length === 0){
+      el.innerHTML = '<div class="empty-state">No whispers yet. Be the first! 💬</div>';
+      return;
+    }
+    el.innerHTML = d.rumors.map(r => renderRumor(r)).join('');
+  } catch(e){
+    el.innerHTML = '<div class="empty-state">Could not load whispers.</div>';
+  }
+}
+
+function renderRumor(r){
+  const hl = r.highlighted ? ' highlighted' : '';
+  const tags = r.tags ? r.tags.map(t => `<span class="tag">#${t}</span>`).join('') : '';
+  const badge = r.badge_label ? `<span class="badge">${r.badge_label}</span>` : '';
+  const isNew = r.is_new ? '<span class="is-new">🆕</span>' : '';
+  const bumpTag = r.bumped ? '<span class="tag" style="color:var(--accent)">⬆ recent</span>' : '';
+  return `<div class="rumor-card${hl}">
+    <div class="meta">
+      <span class="handle">${r.handle}${badge}${isNew}</span>
+      <span>${new Date(r.created_at).toLocaleDateString()}</span>
+    </div>
+    <div class="text">${escHtml(r.text)}</div>
+    ${tags ? `<div class="tags">${tags}${bumpTag}</div>` : `<div class="tags">${bumpTag}</div>`}
+  </div>`;
+}
+
+function escHtml(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+/* Post */
+async function postRumor(){
+  const text = $('compose-text').value.trim();
+  if(!text){ toast('Write something!', true); return; }
+  try {
+    await api('POST', '/api/rumors', { text, tags: [...selectedTags] });
+    $('compose-text').value = '';
+    document.querySelectorAll('.tag-chip').forEach(x => x.classList.remove('active'));
+    selectedTags.clear();
+    toast('Whisper posted!');
+    loadFeed();
+    loadProfile();
+  } catch(e){ toast(e.message, true); }
+}
+
+/* Profile */
+async function loadProfile(){
+  try {
+    const d = await api('GET', '/api/me');
+    $('header-pts').textContent = d.points + ' pts';
+    let html = `<div class="profile-card">
+      <div style="font-size:18px;font-weight:700">@${d.handle}</div>
+      <div class="stat-row">
+        <div class="stat"><div class="num">${d.points}</div><div class="label">Points</div></div>
+        <div class="stat"><div class="num">${d.streak || 0}🔥</div><div class="label">Streak</div></div>
+        <div class="stat"><div class="num">#${d.rank || '—'}</div><div class="label">Rank</div></div>
+      </div>`;
+    if(d.streak_at_risk_today) html += `<div style="text-align:center;color:var(--danger);font-size:13px;margin-bottom:8px">⚠️ Post today to keep your streak!</div>`;
+    if(d.badges && d.badges.length){
+      html += '<div class="badge-row">' + d.badges.map(b => `<span class="badge-item">${b.label}</span>`).join('') + '</div>';
+    }
+    html += '</div>';
+    $('profile-area').innerHTML = html;
+  } catch(e){ /* ignore */ }
+}
+
+/* Shop */
+async function loadShop(){
+  try {
+    const d = await api('GET', '/api/shop');
+    const items = d.items || {};
+    const keys = Object.keys(items);
+    if(!keys.length){ $('shop').innerHTML = '<div class="empty-state">Shop empty.</div>'; return; }
+    $('shop').innerHTML = keys.map(k => {
+      const it = items[k];
+      return `<div class="shop-item">
+        <div class="info">
+          <div class="title">${it.label}</div>
+          <div class="desc">${it.desc}</div>
+        </div>
+        <div><div class="price">${it.price} pts</div>
+        <button class="btn btn-sm btn-primary" onclick="buyItem('${k}')">Buy</button></div>
+      </div>`;
+    }).join('');
+  } catch(e){ $('shop').innerHTML = '<div class="empty-state">Shop unavailable.</div>'; }
+}
+
+async function buyItem(kind){
+  try {
+    const d = await api('POST', '/api/shop/buy', { kind });
+    toast(`Purchased! ${d.points} pts remaining`);
+    loadProfile();
+    loadShop();
+  } catch(e){ toast(e.message, true); }
+}
+
+/* Tags */
+async function loadTags(){
+  try {
+    const d = await api('GET', '/api/tags');
+    let followed = [];
+    try { const f = await api('GET', '/api/me/tags'); followed = f.followed_tags || []; } catch(e){}
+    if(!d.tags || !d.tags.length){ $('tags-list').innerHTML = '<div class="empty-state">No tags yet.</div>'; return; }
+    $('tags-list').innerHTML = d.tags.map(t => {
+      const isFollowing = followed.includes(t.name);
+      return `<div class="tag-row">
+        <div><span class="name">#${t.name}</span> <span class="count">${t.count} whispers</span></div>
+        <button class="btn btn-sm ${isFollowing?'btn-danger':'btn-ghost'} follow-btn"
+          onclick="${isFollowing ? `unfollowTag('${t.name}')` : `followTag('${t.name}')`}">
+          ${isFollowing ? 'Unfollow' : 'Follow'}
+        </button>
+      </div>`;
+    }).join('');
+  } catch(e){ $('tags-list').innerHTML = '<div class="empty-state">Could not load tags.</div>'; }
+}
+
+async function followTag(name){
+  try { await api('POST', `/api/tags/${name}/follow`); toast('Following #' + name); loadTags(); } catch(e){ toast(e.message, true); }
+}
+async function unfollowTag(name){
+  try { await api('DELETE', `/api/tags/${name}/follow`); toast('Unfollowed #' + name); loadTags(); } catch(e){ toast(e.message, true); }
+}
+
+/* Leaderboard */
+async function loadLeaderboard(){
+  try {
+    const d = await api('GET', '/api/leaderboard');
+    if(!d.leaderboard || !d.leaderboard.length){ $('leaderboard').innerHTML = '<div class="empty-state">No rankings yet.</div>'; return; }
+    $('leaderboard').innerHTML = d.leaderboard.map((e, i) =>
+      `<div class="lb-entry ${e.is_me ? 'is-me' : ''} ${e.featured ? 'featured' : ''}">
+        <span class="rank">${medal(i+1)}</span>
+        <span class="alias">${e.alias}</span>
+        <span class="pts">${e.points} pts</span>
+      </div>`
+    ).join('');
+  } catch(e){ $('leaderboard').innerHTML = '<div class="empty-state">Could not load leaderboard.</div>'; }
+}
+function medal(n){ if(n===1) return '🥇'; if(n===2) return '🥈'; if(n===3) return '🥉'; return n; }
+
+/* Challenges */
+async function loadChallenges(){
+  try {
+    const d = await api('GET', '/api/challenges');
+    if(!d.challenges || !d.challenges.length){ $('challenges').innerHTML = '<div class="empty-state">No challenges this week.</div>'; return; }
+    $('challenges').innerHTML = d.challenges.map(c => {
+      const pct = c.goal > 0 ? Math.round(c.progress / c.goal * 100) : 0;
+      const done = c.completed && !c.claimed;
+      return `<div class="challenge">
+        <div class="head">
+          <h4>${c.label}</h4>
+          <span style="font-size:13px;color:var(--muted)">${c.progress}/${c.goal}</span>
+        </div>
+        <div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div>
+        <div style="font-size:12px;color:var(--muted)">Reward: ${c.reward} pts</div>
+        ${done ? `<button class="btn btn-sm btn-primary" onclick="claimChallenge('${c.key}')" style="margin-top:6px">Claim</button>` : ''}
+        ${c.claimed ? '<span style="font-size:12px;color:var(--accent)">✓ Claimed</span>' : ''}
+      </div>`;
+    }).join('');
+  } catch(e){ $('challenges').innerHTML = ''; }
+}
+
+async function claimChallenge(key){
+  try { await api('POST', `/api/challenges/${key}/claim`); toast('Claimed!'); loadChallenges(); loadProfile(); } catch(e){ toast(e.message, true); }
+}
+</script>
+</body>
+</html>
