@@ -1075,9 +1075,13 @@ def get_db(db_path=None):
                 if _db_global is None:
                     # Build the final URL once for this worker
                     if _resolved_pg_url is None:
-                        # Use DATABASE_URL as-is — psycopg3 on Python 3.14+ handles SNI natively,
-                        # no IPv4 pinning needed. The pooled URL already has sslmode & options.
-                        _resolved_pg_url = url
+                        # Render free tier can't route Neon's IPv6 — force IPv4
+                        import socket
+                        from urllib.parse import urlparse
+                        parsed = urlparse(url)
+                        addrs = socket.getaddrinfo(parsed.hostname, None, socket.AF_INET)
+                        ip = addrs[0][4][0]
+                        _resolved_pg_url = url.replace(parsed.hostname, ip)
                     _db_global = psycopg.connect(
                         f"{_resolved_pg_url}&connect_timeout=5",
                         row_factory=dict_row,
