@@ -10,7 +10,10 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, jsonify, request, session, current_app, g
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import generate_password_hash, check_password_hash
+
+socketio = SocketIO(async_mode='eventlet')
 
 
 def create_app(config=None):
@@ -26,6 +29,8 @@ def create_app(config=None):
     )
     if config:
         app.config.update(config)
+
+    socketio.init_app(app, cors_allowed_origins="*")
 
     @app.before_request
     def persist_session():
@@ -803,7 +808,256 @@ def create_app(config=None):
         )
         return resp
 
-    # Ensure schema exists on startup. Render runs `gunicorn "app:create_app()"`
+    # === SocketIO: Real-time messaging ===
+
+    @socketio.on('connect')
+    def chat_connect():
+        if not session.get('user_id'):
+            return False  # reject
+        uid = session['user_id']
+        # Join a personal room for DM delivery
+        join_room(f'user_{uid}')
+
+    @socketio.on('disconnect')
+    def chat_disconnect():
+        pass
+
+    @socketio.on('send_message')
+    def handle_message(data):
+        """Send a message in a conversation."""
+        uid = session.get('user_id')
+        if not uid:
+            emit('error', {'message': 'Not authenticated'})
+            return
+        conv_id = data.get('conversation_id')
+        text = (data.get('text') or '').strip()
+        if not conv_id or not text:
+            emit('error', {'message': 'conversation_id and text required'})
+            return
+        # Verify user is a participant
+        conn = get_db()
+        import psycopg
+        is_pg = isinstance(conn, psycopg.Connection)
+        row = exec(conn,
+            "SELECT 1 FROM conversation_participants "
+            "WHERE conversation_id=? AND user_id=?",
+            (conv_id, uid)).fetchone()
+        if not row:
+            conn.close()
+            emit('error', {'message': 'Not a participant'})
+            return
+        created_at = datetime.now(timezone.utc).isoformat()
+        if is_pg:
+            cur = exec(conn,
+                "INSERT INTO messages (conversation_id, sender_id, text, created_at) "
+                "VALUES (?,?,?,?) RETURNING id",
+                (conv_id, uid, text, created_at))
+            conn.commit()
+            mid = cur.fetchone()["id"]
+        else:
+            cur = exec(conn,
+                "INSERT INTO messages (conversation_id, sender_id, text, created_at) "
+                "VALUES (?,?,?,?)",
+                (conv_id, uid, text, created_at))
+            conn.commit()
+            mid = cur.lastrowid
+        # Get sender handle
+        handle_row = exec(conn, "SELECT handle FROM users WHERE id=?", (uid,)).fetchone()
+        handle = handle_row["handle"] if handle_row else "unknown"
+        conn.close()
+        # Broadcast to conversation room AND the sender's personal room
+        payload = {
+            "id": mid, "conversation_id": conv_id,
+            "sender_id": uid, "sender_handle": handle,
+            "text": text, "created_at": created_at
+        }
+        emit('new_message', payload, room=f'conv_{conv_id}')
+        emit('new_message', payload, room=f'user_{uid}')
+
+    @socketio.on('join_conversation')
+    def handle_join(data):
+        uid = session.get('user_id')
+        if not uid:
+            return False
+        conv_id = data.get('conversation_id')
+        if not conv_id:
+            return
+        # Verify participant
+        conn = get_db()
+        row = exec(conn,
+            "SELECT 1 FROM conversation_participants "
+            "WHERE conversation_id=? AND user_id=?",
+            (conv_id, uid)).fetchone()
+        conn.close()
+        if row:
+            join_room(f'conv_{conv_id}')
+
+    @socketio.on('typing')
+    def handle_typing(data):
+        uid = session.get('user_id')
+        if not uid:
+            return
+        conv_id = data.get('conversation_id')
+        is_typing = data.get('is_typing', False)
+        if not conv_id:
+            return
+        # Get sender handle
+        conn = get_db()
+        handle_row = exec(conn, "SELECT handle FROM users WHERE id=?", (uid,)).fetchone()
+        handle = handle_row["handle"] if handle_row else "unknown"
+        conn.close()
+        # Broadcast to OTHER participants in the conv room
+        emit('typing', {
+            'conversation_id': conv_id,
+            'sender_id': uid,
+            'sender_handle': handle,
+            'is_typing': is_typing,
+        }, room=f'conv_{conv_id}', include_self=False)
+
+    # === REST endpoints for conversations ===
+
+    @app.get("/api/users/search")
+    def search_users():
+        """Search users by handle for starting a conversation."""
+        q = (request.args.get("q") or "").strip().lower()
+        if len(q) < 1:
+            return jsonify({"users": []})
+        conn = get_db()
+        rows = exec(conn,
+            "SELECT id, handle FROM users WHERE banned=0 AND handle LIKE ? "
+            "ORDER BY handle LIMIT 10",
+            (f"%{q}%",)).fetchall()
+        conn.close()
+        return jsonify({"users": [{"id": r["id"], "handle": r["handle"]} for r in rows]})
+
+    @app.post("/api/conversations")
+    def create_conversation():
+        """Start a new DM with another user."""
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        p = request.get_json(silent=True) or {}
+        target_id = p.get("user_id")
+        if not target_id or target_id == session["user_id"]:
+            return jsonify({"error": "Invalid target user."}), 400
+        conn = get_db()
+        # Check target exists
+        target = exec(conn, "SELECT id FROM users WHERE id=? AND banned=0",
+                      (target_id,)).fetchone()
+        if not target:
+            conn.close()
+            return jsonify({"error": "User not found."}), 404
+        uid = session["user_id"]
+        import psycopg
+        is_pg = isinstance(conn, psycopg.Connection)
+        # Check existing conversation between these two users
+        existing = exec(conn,
+            "SELECT cp1.conversation_id FROM conversation_participants cp1 "
+            "JOIN conversation_participants cp2 "
+            "ON cp1.conversation_id = cp2.conversation_id "
+            "WHERE cp1.user_id=? AND cp2.user_id=? AND cp1.user_id < cp2.user_id",
+            (uid, target_id)).fetchone()
+        if existing:
+            conn.close()
+            return jsonify({"conversation_id": existing["conversation_id"]})
+        # Create new conversation
+        now = datetime.now(timezone.utc).isoformat()
+        if is_pg:
+            cur = exec(conn,
+                "INSERT INTO conversations (created_at) VALUES (?) RETURNING id",
+                (now,))
+            conn.commit()
+            conv_id = cur.fetchone()["id"]
+        else:
+            exec(conn, "INSERT INTO conversations (created_at) VALUES (?)", (now,))
+            conn.commit()
+            conv_id = cur.lastrowid
+        # Add participants
+        exec(conn,
+            "INSERT INTO conversation_participants (conversation_id, user_id) VALUES (?,?)",
+            (conv_id, uid))
+        exec(conn,
+            "INSERT INTO conversation_participants (conversation_id, user_id) VALUES (?,?)",
+            (conv_id, target_id))
+        conn.commit()
+        conn.close()
+        return jsonify({"conversation_id": conv_id}), 201
+
+    @app.get("/api/conversations")
+    def list_conversations():
+        """List the current user's conversations with last message preview."""
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        uid = session["user_id"]
+        conn = get_db()
+        rows = exec(conn,
+            "SELECT c.id AS conv_id, "
+            "  (SELECT handle FROM users WHERE id = "
+            "    (SELECT cp2.user_id FROM conversation_participants cp2 "
+            "     WHERE cp2.conversation_id = c.id AND cp2.user_id != ?)"
+            "  ) AS other_handle, "
+            "  (SELECT text FROM messages WHERE conversation_id = c.id "
+            "   ORDER BY id DESC LIMIT 1) AS last_message, "
+            "  (SELECT created_at FROM messages WHERE conversation_id = c.id "
+            "   ORDER BY id DESC LIMIT 1) AS last_at "
+            "FROM conversations c "
+            "WHERE c.id IN ("
+            "  SELECT conversation_id FROM conversation_participants WHERE user_id=?"
+            ") ORDER BY last_at DESC NULLS LAST, c.id DESC",
+            (uid, uid)).fetchall()
+        conn.close()
+        out = []
+        for r in rows:
+            out.append({
+                "id": r["conv_id"],
+                "other_handle": r["other_handle"],
+                "last_message": r["last_message"],
+                "last_at": r["last_at"],
+            })
+        return jsonify({"conversations": out})
+
+    @app.get("/api/conversations/<int:conv_id>/messages")
+    def get_messages(conv_id):
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        uid = session["user_id"]
+        conn = get_db()
+        # Verify participant
+        row = exec(conn,
+            "SELECT 1 FROM conversation_participants "
+            "WHERE conversation_id=? AND user_id=?",
+            (conv_id, uid)).fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Not a participant."}), 403
+        before = request.args.get("before")
+        limit = min(int(request.args.get("limit") or 50), 100)
+        if before:
+            rows = exec(conn,
+                "SELECT m.id, m.sender_id, u.handle AS sender_handle, "
+                "m.text, m.created_at FROM messages m "
+                "JOIN users u ON u.id = m.sender_id "
+                "WHERE m.conversation_id=? AND m.id < ? "
+                "ORDER BY m.id DESC LIMIT ?",
+                (conv_id, before, limit)).fetchall()
+        else:
+            rows = exec(conn,
+                "SELECT m.id, m.sender_id, u.handle AS sender_handle, "
+                "m.text, m.created_at FROM messages m "
+                "JOIN users u ON u.id = m.sender_id "
+                "WHERE m.conversation_id=? "
+                "ORDER BY m.id DESC LIMIT ?",
+                (conv_id, limit)).fetchall()
+        conn.close()
+        msgs = [{
+            "id": r["id"], "sender_id": r["sender_id"],
+            "sender_handle": r["sender_handle"],
+            "text": r["text"], "created_at": r["created_at"],
+        } for r in reversed(rows)]
+        return jsonify({"messages": msgs})
+
+    # === End SocketIO / Chat section ===
+
+    # Ensure schema exists on startup.
     # (create_app is called directly, not run.py), so we must init the DB here
     # — otherwise tables are never created and every API call 500s.
     # Tolerate a temporarily-unavailable DB at import time: log and continue
@@ -1274,6 +1528,29 @@ def init_db(db_path=None):
             conn.execute("ALTER TABLE users ADD COLUMN selected_badge TEXT DEFAULT NULL")
         except Exception:
             pass
+        # Chat tables
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS conversation_participants (
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                PRIMARY KEY (conversation_id, user_id)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+                sender_id INTEGER NOT NULL REFERENCES users(id),
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
     else:  # Postgres
         conn.execute(
             """CREATE TABLE IF NOT EXISTS users (
@@ -1392,6 +1669,29 @@ def init_db(db_path=None):
                 meta TEXT,
                 created_at TEXT NOT NULL,
                 expires_at TEXT
+            )"""
+        )
+        # Chat tables (Postgres)
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS conversations (
+                id SERIAL PRIMARY KEY,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS conversation_participants (
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                PRIMARY KEY (conversation_id, user_id)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+                sender_id INTEGER NOT NULL REFERENCES users(id),
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )"""
         )
     conn.commit()
@@ -1561,3 +1861,6 @@ def _user_rank(conn, user_id):
         "(SELECT points FROM users WHERE id=?)",
         (user_id,)).fetchone()
     return row[0] if row else None
+
+# Module-level WSGI app for gunicorn (see Procfile: -k eventlet app:app)
+app = create_app()

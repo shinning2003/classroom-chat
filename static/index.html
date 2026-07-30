@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>Whisper Room</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#0a0f1a;--surface:#111827;--surface2:#1a2332;--accent:#00d4ff;--accent-glow:#00d4ff33;--text:#e2e8f0;--muted:#64748b;--border:#1e293b;--radius:10px;--danger:#ef4444;}
@@ -122,6 +123,33 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
 .badge-select{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
 .badge-opt{padding:6px 12px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:12px;background:var(--surface2)}
 .badge-opt.selected{border-color:var(--accent);background:var(--accent);color:#0a0f1a}
+
+/* Chat UI */
+#chat-area{display:flex;flex-direction:column;height:calc(100vh - 120px)}
+.conv-search{display:flex;gap:6px;margin-bottom:8px}
+.conv-search input{flex:1}
+.conv-list{flex:1;overflow-y:auto}
+.conv-item{display:flex;align-items:center;padding:10px 12px;border-radius:var(--radius);border:1px solid var(--border);margin-bottom:6px;cursor:pointer;background:var(--surface)}
+.conv-item:hover{background:var(--surface2)}
+.conv-item .handle{font-weight:600;font-size:14px;color:var(--accent)}
+.conv-item .preview{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
+.conv-item .time{font-size:10px;color:var(--muted);margin-left:auto;white-space:nowrap}
+/* Message view */
+#msg-view{position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg);z-index:150;display:flex;flex-direction:column}
+#msg-header{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 16px;display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600}
+#msg-header .back{cursor:pointer;color:var(--accent);font-size:20px;line-height:1}
+#msgs{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+.msg{max-width:80%;padding:8px 12px;border-radius:12px;font-size:14px;line-height:1.4;word-break:break-word}
+.msg.mine{align-self:flex-end;background:var(--accent);color:#0a0f1a;border-bottom-right-radius:4px}
+.msg.theirs{align-self:flex-start;background:var(--surface2);border:1px solid var(--border);border-bottom-left-radius:4px}
+.msg .sender{font-size:11px;color:var(--muted);margin-bottom:2px}
+.msg.mine .sender{color:rgba(0,0,0,.5)}
+.msg .time{font-size:10px;color:var(--muted);text-align:right;margin-top:2px}
+#msg-input-area{display:flex;gap:8px;padding:8px 12px;background:var(--surface);border-top:1px solid var(--border)}
+#msg-input-area input{flex:1}
+#typing-indicator{font-size:11px;color:var(--muted);padding:2px 12px 4px;min-height:18px}
+.user-search-result{padding:8px 12px;cursor:pointer;border-radius:var(--radius);border:1px solid var(--border);margin-bottom:4px;background:var(--surface)}
+.user-search-result:hover{background:var(--surface2)}
 </style>
 </head>
 <body>
@@ -207,6 +235,17 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
       <h3 style="margin:16px 0 10px;font-size:16px">🏪 Shop</h3>
       <div id="shop"></div>
     </div>
+    <!-- Chat tab -->
+    <div class="tab-content" id="tab-chat">
+      <h3 style="margin-bottom:10px;font-size:16px">💬 Chat</h3>
+      <div id="chat-area">
+        <div class="conv-search">
+          <input id="chat-search" placeholder="Search users…" oninput="searchUsers(this.value)">
+        </div>
+        <div id="user-results" class="hidden"></div>
+        <div class="conv-list" id="conv-list"></div>
+      </div>
+    </div>
   </div>
   <div id="bottom-nav">
     <div class="nav-item active" data-tab="feed">
@@ -225,6 +264,24 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
       Me
     </div>
+    <div class="nav-item" data-tab="chat">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      Chat
+    </div>
+  </div>
+</div>
+
+<!-- Message view overlay -->
+<div id="msg-view" class="hidden">
+  <div id="msg-header">
+    <span class="back" onclick="closeMsgView()">←</span>
+    <span id="msg-header-handle"></span>
+  </div>
+  <div id="typing-indicator"></div>
+  <div id="msgs"></div>
+  <div id="msg-input-area">
+    <input id="msg-input" placeholder="Type a message…" onkeydown="if(event.key==='Enter')sendMessage()">
+    <button class="btn btn-sm btn-primary" onclick="sendMessage()">Send</button>
   </div>
 </div>
 
@@ -288,6 +345,7 @@ async function forgotPassword(){
 
 function logout(){
   state.user = null;
+  disconnectSocket();
   $('app').classList.add('hidden');
   $('auth-screen').classList.remove('hidden');
   $('login-id').value = '';
@@ -298,6 +356,8 @@ async function enterApp(handle){
   $('auth-screen').classList.add('hidden');
   $('app').classList.remove('hidden');
   $('header-handle').textContent = '@' + handle;
+  state.user = { handle };
+  connectSocket();
   loadProfile();
   loadFeed();
   loadTags();
@@ -315,6 +375,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if(el.dataset.tab === 'tags') loadTags();
     if(el.dataset.tab === 'leaderboard') { loadLeaderboard(); loadChallenges(); }
     if(el.dataset.tab === 'profile') { loadProfile(); loadShop(); }
+    if(el.dataset.tab === 'chat') { loadConversations(); }
   });
 });
 
@@ -509,6 +570,175 @@ async function loadChallenges(){
 
 async function claimChallenge(key){
   try { await api('POST', `/api/challenges/${key}/claim`); toast('Claimed!'); loadChallenges(); loadProfile(); } catch(e){ toast(e.message, true); }
+}
+
+/* ======= SocketIO & Live Chat ======= */
+
+let socket = null;
+let currentConvId = null;
+
+function connectSocket(){
+  if(socket && socket.connected) return;
+  socket = io({ transports: ['websocket', 'polling'] });
+  socket.on('connect', () => console.log('SocketIO connected'));
+  socket.on('new_message', data => {
+    // If we're viewing this conversation, add the message
+    if(currentConvId && data.conversation_id === currentConvId){
+      addMessage(data);
+    }
+    // Reload conversation list to update previews
+    if($('tab-chat').classList.contains('active')) loadConversations();
+  });
+  socket.on('typing', data => {
+    if(currentConvId && data.conversation_id === currentConvId){
+      $('typing-indicator').textContent = data.is_typing ? `${data.sender_handle || 'Someone'} is typing…` : '';
+    }
+  });
+  socket.on('disconnect', () => console.log('SocketIO disconnected'));
+}
+
+function disconnectSocket(){
+  if(socket) { socket.disconnect(); socket = null; }
+}
+
+/* Chat */
+function searchUsers(q){
+  const el = $('user-results');
+  if(q.length < 2){ el.classList.add('hidden'); return; }
+  api('GET', '/api/users/search?q=' + encodeURIComponent(q))
+    .then(d => {
+      if(!d.users || !d.users.length){ el.classList.add('hidden'); return; }
+      el.innerHTML = d.users.map(u =>
+        `<div class="user-search-result" onclick="startConversation(${u.id})">@${escHtml(u.handle)}</div>`
+      ).join('');
+      el.classList.remove('hidden');
+    }).catch(() => {});
+}
+
+async function startConversation(userId){
+  try {
+    const d = await api('POST', '/api/conversations', { user_id: userId });
+    $('chat-search').value = '';
+    $('user-results').classList.add('hidden');
+    openConversation(d.conversation_id);
+    loadConversations();
+  } catch(e){ toast(e.message, true); }
+}
+
+async function loadConversations(){
+  try {
+    const d = await api('GET', '/api/conversations');
+    const el = $('conv-list');
+    if(!d.conversations || !d.conversations.length){
+      el.innerHTML = '<div class="empty-state">No conversations yet. Search for a user to start chatting!</div>';
+      return;
+    }
+    el.innerHTML = d.conversations.map(c =>
+      `<div class="conv-item" onclick="openConversation(${c.id})">
+        <div style="flex:1">
+          <div class="handle">@${escHtml(c.other_handle)}</div>
+          ${c.last_message ? `<div class="preview">${escHtml(c.last_message)}</div>` : '<div class="preview" style="color:var(--accent)">Start chatting…</div>'}
+        </div>
+        ${c.last_at ? `<div class="time">${timeAgo(c.last_at)}</div>` : ''}
+      </div>`
+    ).join('');
+  } catch(e){ /* ignore */ }
+}
+
+async function openConversation(convId){
+  currentConvId = convId;
+  // Get other handle from the conversation list data
+  const convs = await api('GET', '/api/conversations');
+  const conv = convs.conversations.find(c => c.id === convId);
+  $('msg-header-handle').textContent = '@' + (conv ? escHtml(conv.other_handle) : 'Chat');
+  $('msg-view').classList.remove('hidden');
+  $('typing-indicator').textContent = '';
+  $('msg-input').value = '';
+  $('msg-input').focus();
+  // Join the SocketIO room
+  if(socket && socket.connected) socket.emit('join_conversation', { conversation_id: convId });
+  await loadMessages();
+}
+
+function closeMsgView(){
+  currentConvId = null;
+  $('msg-view').classList.add('hidden');
+  // Typing cleanup
+  if(socket && socket.connected) socket.emit('typing', { conversation_id: currentConvId, is_typing: false });
+}
+
+async function loadMessages(){
+  if(!currentConvId) return;
+  try {
+    const d = await api('GET', `/api/conversations/${currentConvId}/messages`);
+    const el = $('msgs');
+    if(!d.messages || !d.messages.length){
+      el.innerHTML = '<div class="empty-state" style="padding:20px">No messages yet. Say hello!</div>';
+      return;
+    }
+    el.innerHTML = d.messages.map(m => renderMessage(m)).join('');
+    el.scrollTop = el.scrollHeight;
+  } catch(e){ $('msgs').innerHTML = '<div class="empty-state">Could not load messages.</div>'; }
+}
+
+function renderMessage(m){
+  const isMine = m.sender_handle === (state.user && state.user.handle);
+  return `<div class="msg ${isMine ? 'mine' : 'theirs'}">
+    ${!isMine ? `<div class="sender">@${escHtml(m.sender_handle)}</div>` : ''}
+    <div>${escHtml(m.text)}</div>
+    <div class="time">${timeAgo(m.created_at)}</div>
+  </div>`;
+}
+
+function addMessage(m){
+  const el = $('msgs');
+  const isMine = m.sender_handle === (state.user && state.user.handle);
+  el.insertAdjacentHTML('beforeend', renderMessage(m));
+  el.scrollTop = el.scrollHeight;
+}
+
+async function sendMessage(){
+  if(!currentConvId) return;
+  const input = $('msg-input');
+  const text = input.value.trim();
+  if(!text) return;
+  input.value = '';
+  // Send typing stopped
+  if(socket && socket.connected) socket.emit('typing', { conversation_id: currentConvId, is_typing: false });
+  // Send via SocketIO
+  if(socket && socket.connected){
+    socket.emit('send_message', { conversation_id: currentConvId, text });
+  } else {
+    // Fallback to REST
+    try {
+      const d = await api('POST', `/api/conversations/${currentConvId}/messages`, { text });
+      loadMessages();
+    } catch(e){ toast(e.message, true); }
+  }
+}
+
+// Typing indicator
+let typingTimer = null;
+document.addEventListener('DOMContentLoaded', () => {
+  const input = $('msg-input');
+  if(input){
+    input.addEventListener('input', () => {
+      if(!currentConvId || !socket || !socket.connected) return;
+      socket.emit('typing', { conversation_id: currentConvId, is_typing: true });
+      clearTimeout(typingTimer);
+      typingTimer = setTimeout(() => {
+        socket.emit('typing', { conversation_id: currentConvId, is_typing: false });
+      }, 1500);
+    });
+  }
+});
+
+function timeAgo(iso){
+  const sec = (Date.now() - new Date(iso).getTime()) / 1000;
+  if(sec < 60) return 'now';
+  if(sec < 3600) return Math.floor(sec/60)+'m';
+  if(sec < 86400) return Math.floor(sec/3600)+'h';
+  return Math.floor(sec/86400)+'d';
 }
 </script>
 </body>
