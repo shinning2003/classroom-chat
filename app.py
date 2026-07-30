@@ -1,0 +1,1550 @@
+"""Campus Whispers — accountability board for a class.
+
+Posters register a REAL NAME + EMAIL + PASSWORD, choose a public HANDLE.
+The handle is shown publicly; only the admin (owner) can see the real
+identity behind a handle, and can ban/delete anyone who misbehaves.
+"""
+import os
+import re
+import sqlite3
+from datetime import datetime, timezone, timedelta
+
+from flask import Flask, jsonify, request, session, current_app, g
+from werkzeug.security import generate_password_hash, check_password_hash
+
+
+def create_app(config=None):
+    app = Flask(__name__)
+    app.config.from_mapping(
+        DB_PATH=os.environ.get("DB_PATH", "campus_whispers.db"),
+        DATABASE_URL=os.environ.get("DATABASE_URL"),
+        ADMIN_PASSWORD=os.environ.get("ADMIN_PASSWORD", "admin123"),
+        ADMIN_EMAIL=os.environ.get("ADMIN_EMAIL", "11surendiran2003@gmail.com"),
+        SECRET_KEY=os.environ.get("SECRET_KEY", "dev-secret-change-me"),
+        SESSION_PERMANENT=True,
+        PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+    )
+    if config:
+        app.config.update(config)
+
+    @app.before_request
+    def persist_session():
+        session.permanent = True
+
+    @app.teardown_appcontext
+    def close_db(exc=None):
+        db = g.pop("db", None)
+        if db is not None and not getattr(db, "_orig_close", False):
+            db.close()  # SQLite connections need explicit close
+
+    @app.post("/api/register")
+    def register():
+        p = request.get_json(silent=True) or {}
+        real_name = (p.get("real_name") or "").strip()
+        email = (p.get("email") or "").strip().lower()
+        handle = (p.get("handle") or "").strip()
+        password = p.get("password") or ""
+        if not (real_name and email and handle and password):
+            return jsonify({"error": "real_name, email, handle and password required."}), 400
+        if len(password) < 4:
+            return jsonify({"error": "Password too short (min 4)."}), 400
+        if not re.match(r"^[A-Za-z0-9_]{3,20}$", handle):
+            return jsonify({"error": "Handle: 3-20 chars, letters/numbers/_."}), 400
+        if not re.match(r"^[^@]+@[^@]+\.[^@]+$", email):
+            return jsonify({"error": "Invalid email format."}), 400
+        conn = get_db()
+        if exec(conn, "SELECT 1 FROM users WHERE handle=?", (handle,)).fetchone():
+            conn.close()
+            return jsonify({"error": "Handle taken."}), 400
+        if exec(conn, "SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+            conn.close()
+            return jsonify({"error": "Email already registered."}), 400
+        import psycopg
+        is_pg = isinstance(conn, psycopg.Connection)
+        if is_pg:
+            cur = exec(conn,
+                "INSERT INTO users (real_name, email, handle, password_hash) VALUES (?,?,?,?) RETURNING id",
+                (real_name, email, handle, generate_password_hash(password)),
+            )
+            conn.commit()
+            uid = cur.fetchone()["id"]
+        else:
+            cur = exec(conn,
+                "INSERT INTO users (real_name, email, handle, password_hash) VALUES (?,?,?,?)",
+                (real_name, email, handle, generate_password_hash(password)),
+            )
+            conn.commit()
+            uid = cur.lastrowid
+        conn.close()
+        session["user_id"] = uid
+        return jsonify({"ok": True, "handle": handle, "user_id": uid}), 201
+
+    @app.post("/api/login")
+    def login():
+        p = request.get_json(silent=True) or {}
+        # Accept either email or handle as identifier
+        identifier = (p.get("identifier") or p.get("handle") or p.get("email") or "").strip().lower()
+        password = p.get("password") or ""
+        if not identifier or not password:
+            return jsonify({"error": "Identifier (email or handle) and password required."}), 400
+        conn = get_db()
+        # Check if identifier looks like an email
+        if "@" in identifier:
+            row = exec(conn,
+                "SELECT * FROM users WHERE email=?",
+                (identifier,),
+            ).fetchone()
+        else:
+            row = exec(conn,
+                "SELECT * FROM users WHERE handle=?",
+                (identifier,),
+            ).fetchone()
+        conn.close()
+        if not row or not check_password_hash(row["password_hash"], password):
+            return jsonify({"error": "Invalid credentials."}), 401
+        if row["banned"]:
+            return jsonify({"error": "This account has been removed."}), 403
+        session["user_id"] = row["id"]
+        return jsonify({"ok": True, "handle": row["handle"], "user_id": row["id"]})
+
+    @app.post("/api/rumors")
+    def post_rumor():
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        p = request.get_json(silent=True) or {}
+        text = (p.get("text") or "").strip()
+        if not text:
+            return jsonify({"error": "Rumor text is required."}), 400
+        raw_tags = p.get("tags") or []
+        # sanitize: list of 1-20 char slug-ish names, max 5 tags
+        tags = []
+        for t in raw_tags:
+            name = str(t).strip().lower()[:20]
+            if name and name not in tags:
+                tags.append(name)
+        tags = tags[:5]
+        created_at = datetime.now(timezone.utc).isoformat()
+        conn = get_db()
+        import psycopg
+        is_pg = isinstance(conn, psycopg.Connection)
+        if is_pg:
+            cur = exec(conn,
+                "INSERT INTO rumors (user_id, text, created_at) VALUES (?,?,?) "
+                "RETURNING id",
+                (session["user_id"], text, created_at),
+            )
+            conn.commit()
+            rid = cur.fetchone()["id"]
+        else:
+            cur = exec(conn,
+                "INSERT INTO rumors (user_id, text, created_at) VALUES (?,?,?)",
+                (session["user_id"], text, created_at),
+            )
+            conn.commit()
+            rid = cur.lastrowid
+        for name in tags:
+            tid = _upsert_tag(conn, name)
+            exists = exec(conn,
+                "SELECT 1 FROM rumor_tags WHERE rumor_id=? AND tag_id=?",
+                (rid, tid)).fetchone()
+            if not exists:
+                exec(conn,
+                    "INSERT INTO rumor_tags (rumor_id, tag_id) VALUES (?,?)",
+                    (rid, tid))
+        conn.commit()
+        row = exec(conn,
+            "SELECT r.id, r.user_id, r.text, r.created_at, r.bumped_at, u.handle, u.custom_alias, "
+            "r.highlighted, r.is_incognito FROM rumors r "
+            "JOIN users u ON u.id = r.user_id WHERE r.id = ?", (rid,)
+        ).fetchone()
+        out = rumor_public(row, conn)
+        conn.close()
+        return jsonify(out), 201
+
+    @app.get("/api/rumors")
+    def list_rumors():
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        sort = (request.args.get("sort") or "new").strip().lower()
+        tag = (request.args.get("tag") or "").strip().lower()
+        filt = (request.args.get("filter") or "").strip().lower()
+        conn = get_db()
+        base = (("SELECT r.id, r.user_id, r.text, r.created_at, r.bumped_at, u.handle, u.custom_alias, "
+                "r.highlighted, r.is_incognito "
+                "FROM rumors r JOIN users u ON u.id = r.user_id "
+                "WHERE u.banned = 0"))
+        params = ()
+        if tag:
+            base = ("SELECT r.id, r.user_id, r.text, r.created_at, r.bumped_at, u.handle, u.custom_alias, "
+                    "r.highlighted, r.is_incognito "
+                    "FROM rumors r JOIN users u ON u.id = r.user_id "
+                    "JOIN rumor_tags rt ON rt.rumor_id = r.id "
+                    "JOIN tags t ON t.id = rt.tag_id "
+                    "WHERE u.banned = 0 AND t.name = ?")
+            params = (tag,)
+        elif filt == "followed" and session.get("user_id"):
+            base = ("SELECT r.id, r.user_id, r.text, r.created_at, r.bumped_at, u.handle, u.custom_alias, "
+                    "r.highlighted, r.is_incognito "
+                    "FROM rumors r JOIN users u ON u.id = r.user_id "
+                    "JOIN rumor_tags rt ON rt.rumor_id = r.id "
+                    "WHERE u.banned = 0 AND rt.tag_id IN ("
+                    "SELECT tag_id FROM tag_follows WHERE user_id = ?)")
+            params = (session["user_id"],)
+        order_clause = "ORDER BY r.created_at DESC, r.id DESC"
+        if sort == "hot":
+            # Hot: highlighted posts first, then recently bumped, then newest
+            order_clause = ("ORDER BY r.highlighted DESC, "
+                            "r.bumped_at DESC NULLS LAST, "
+                            "r.created_at DESC, r.id DESC")
+        elif sort == "rising":
+            # Rising: newest first (no reactions data to compute a rising score)
+            order_clause = "ORDER BY r.created_at DESC, r.id DESC"
+        rows = exec(conn, base + " " + order_clause, params).fetchall()
+        out = [rumor_public(r, conn) for r in rows]
+        conn.close()
+        return jsonify({"rumors": out})
+
+    @app.get("/api/rumors/<int:rid>/teaser")
+    def rumor_teaser(rid):
+        # Information-gap trigger: hide the text, show a curiosity teaser.
+        conn = get_db()
+        row = exec(conn,
+            "SELECT r.id, r.text, r.created_at, r.bumped_at, u.handle, u.custom_alias, "
+            "r.highlighted, r.is_incognito FROM rumors r "
+            "JOIN users u ON u.id = r.user_id "
+            "WHERE r.id=? AND u.banned=0", (rid,)).fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Rumor not found."}), 404
+        teaser = _make_teaser(row["text"])
+        try:
+            custom_alias = row["custom_alias"] if row["custom_alias"] else None
+        except (KeyError, IndexError, TypeError):
+            custom_alias = None
+        try:
+            is_inc = int(row["is_incognito"])
+        except (KeyError, IndexError, TypeError, ValueError):
+            is_inc = 0
+        handle = custom_alias if custom_alias else row["handle"]
+        if is_inc:
+            handle = "👻 Ghost"
+        data = {
+            "id": row["id"],
+            "handle": handle,
+            "teaser": teaser,
+            "created_at": row["created_at"],
+        }
+        conn.close()
+        return jsonify(data)
+
+
+    # --- Feature 3: Posting streak (Self reward + loss aversion) ---
+    @app.get("/api/me")
+    def me():
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        from datetime import datetime, timezone, timedelta
+        conn = get_db()
+        uid = session["user_id"]
+        row = exec(conn, "SELECT handle, selected_badge FROM users WHERE id=?",
+                   (uid,)).fetchone()
+        if row is None:
+            session.clear()
+            conn.close()
+            return jsonify({"error": "User not found."}), 404
+        streak, at_risk = _compute_streak(conn, uid)
+        points = _compute_points(conn, uid)
+        badges = _compute_badges(conn, uid)
+        rank = _user_rank(conn, uid)
+        # Check if user has active featured badge
+        now_iso = datetime.now(timezone.utc).isoformat()
+        feat = exec(conn,
+            "SELECT id FROM purchases WHERE user_id=? AND kind='featured' "
+            "AND (expires_at IS NULL OR expires_at > ?)", (uid, now_iso)
+        ).fetchone()
+        recent_bumped = exec(conn,
+            "SELECT id, text, created_at, bumped_at FROM rumors "
+            "WHERE user_id=? AND bumped_at IS NOT NULL AND bumped_at >= ? "
+            "ORDER BY bumped_at DESC",
+            (uid, (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat())
+        ).fetchall()
+        recent_bumped_out = [{
+            "id": r["id"],
+            "text": r["text"],
+            "created_at": r["created_at"],
+            "bumped_at": r["bumped_at"],
+            "preview": r["text"][:80],
+        } for r in recent_bumped]
+        conn.close()
+        return jsonify({"handle": row["handle"],
+                        "user_id": uid,
+                        "selected_badge": row["selected_badge"],
+                        "streak": streak,
+                        "streak_at_risk_today": at_risk,
+                        "points": points, "badges": badges, "rank": rank,
+                        "featured": bool(feat),
+                        "recent_bumped": recent_bumped_out})
+
+    # --- Reward system: challenges, leaderboard (anonymized) ---
+    @app.get("/api/challenges")
+    def list_challenges():
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        conn = get_db()
+        uid = session["user_id"]
+        week = _current_week()
+        claimed = set()
+        for r in exec(conn,
+                "SELECT challenge_key FROM challenge_claims WHERE user_id=? AND week=?",
+                (uid, week)).fetchall():
+            claimed.add(r[0] if not hasattr(r, "keys") else r["challenge_key"])
+        out = []
+        for key, label, goal, reward, kind in CHALLENGE_DEFS:
+            progress = _challenge_progress(conn, uid, kind)
+            out.append({
+                "key": key, "label": label, "goal": goal, "reward": reward,
+                "progress": min(progress, goal),
+                "completed": progress >= goal,
+                "claimed": key in claimed,
+            })
+        conn.close()
+        return jsonify({"week": week, "challenges": out})
+
+    @app.post("/api/challenges/<key>/claim")
+    def claim_challenge(key):
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        cdef = next((c for c in CHALLENGE_DEFS if c[0] == key), None)
+        if not cdef:
+            return jsonify({"error": "Unknown challenge."}), 404
+        _k, _label, goal, _reward, kind = cdef
+        conn = get_db()
+        uid = session["user_id"]
+        week = _current_week()
+        if _challenge_progress(conn, uid, kind) < goal:
+            conn.close()
+            return jsonify({"error": "Challenge not complete yet."}), 400
+        already = exec(conn,
+            "SELECT 1 FROM challenge_claims WHERE user_id=? AND challenge_key=? AND week=?",
+            (uid, key, week)).fetchone()
+        if already:
+            conn.close()
+            return jsonify({"error": "Already claimed this week."}), 400
+        exec(conn,
+            "INSERT INTO challenge_claims (user_id, challenge_key, week, claimed_at) "
+            "VALUES (?,?,?,?)",
+            (uid, key, week, datetime.now(timezone.utc).isoformat()))
+        conn.commit()
+        points = _compute_points(conn, uid)
+        conn.close()
+        return jsonify({"ok": True, "claimed": key, "points": points})
+
+    @app.get("/api/leaderboard")
+    def leaderboard():
+        conn = get_db()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        featured_users = set()
+        for r in exec(conn,
+            "SELECT DISTINCT user_id FROM purchases WHERE kind='featured' "
+            "AND (expires_at IS NULL OR expires_at > ?)", (now_iso,)
+        ).fetchall():
+            featured_users.add(r[0] if not hasattr(r, "keys") else r["user_id"])
+        # Use the cached points column instead of recomputing for every user
+        scored_rows = exec(conn,
+            "SELECT id, points FROM users WHERE banned=0 "
+            "ORDER BY points DESC, id"
+        ).fetchall()
+        conn.close()
+        # Anonymized: alias only (Player #N), never the handle/email/real_name.
+        out = []
+        for i, row in enumerate(scored_rows[:10], start=1):
+            uid = row[0] if not hasattr(row, "keys") else row["id"]
+            pts = row[1] if not hasattr(row, "keys") else row["points"]
+            entry = {"rank": i, "alias": f"Player #{i}", "points": pts}
+            if uid in featured_users:
+                entry["featured"] = True
+            if session.get("user_id") and uid == session["user_id"]:
+                entry["is_me"] = True
+            out.append(entry)
+        return jsonify({"leaderboard": out})
+
+    @app.post("/api/badge/select")
+    def badge_select():
+        """Set the user's active badge flair."""
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        p = request.get_json(silent=True) or {}
+        key = (p.get("key") or "").strip()
+        uid = session["user_id"]
+        conn = get_db()
+        badges = _compute_badges(conn, uid)
+        owned_keys = [b["key"] for b in badges]
+        if key and key not in owned_keys:
+            conn.close()
+            return jsonify({"error": "You don't own this badge."}), 400
+        exec(conn, "UPDATE users SET selected_badge=? WHERE id=?", (key or None, uid))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "selected_badge": key or None})
+
+    # --- Shop: spend points on cosmetic/perk features ---
+    @app.get("/api/shop")
+    def list_shop():
+        """Return available shop items with prices."""
+        return jsonify({"items": {
+            k: {"label": v[0], "desc": v[1], "price": v[2]}
+            for k, v in SHOP_ITEMS.items()
+        }})
+
+    @app.get("/api/me/whispers")
+    def my_whispers():
+        """Return the current user's own whispers (for targeting purchases)."""
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        conn = get_db()
+        rows = exec(conn,
+            "SELECT r.id, substr(r.text, 1, 80) AS preview, r.created_at, r.bumped_at, "
+            "r.highlighted, r.is_incognito, u.custom_alias "
+            "FROM rumors r JOIN users u ON u.id = r.user_id "
+            "WHERE r.user_id=? ORDER BY r.id DESC", (session["user_id"],)
+        ).fetchall()
+        conn.close()
+        return jsonify({"whispers": [dict(r) for r in rows]})
+
+    @app.post("/api/shop/buy")
+    def shop_buy():
+        """Purchase a shop item. Deducts points from the user's balance."""
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        p = request.get_json(silent=True) or {}
+        kind = (p.get("kind") or "").strip()
+        rumor_id = p.get("rumor_id")
+        alias = (p.get("alias") or "").strip()
+
+        if kind not in SHOP_ITEMS:
+            return jsonify({"error": "Unknown item."}), 400
+
+        price = SHOP_ITEMS[kind][2]
+        uid = session["user_id"]
+        conn = get_db()
+
+        # Check affordability
+        points = _compute_points(conn, uid)
+        if points < price:
+            conn.close()
+            return jsonify({"error": "Not enough points.",
+                            "points": points, "price": price}), 400
+
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Validate and apply
+        if kind == "alias":
+            if not alias:
+                conn.close()
+                return jsonify({"error": "Alias text required."}), 400
+            if len(alias) > 30:
+                conn.close()
+                return jsonify({"error": "Alias too long (max 30 chars)."}), 400
+            exec(conn, "UPDATE users SET custom_alias=? WHERE id=?",
+                 (alias, uid))
+            exec(conn,
+                 "INSERT INTO purchases (user_id, kind, meta, created_at) "
+                 "VALUES (?, ?, ?, ?)",
+                 (uid, kind, alias, now))
+
+        elif kind == "highlight":
+            if not rumor_id:
+                conn.close()
+                return jsonify({"error": "rumor_id required."}), 400
+            # Verify ownership
+            r = exec(conn,
+                "SELECT id FROM rumors WHERE id=? AND user_id=?",
+                (rumor_id, uid)).fetchone()
+            if not r:
+                conn.close()
+                return jsonify({"error": "Rumor not found or not yours."}), 404
+            exec(conn, "UPDATE rumors SET highlighted=1 WHERE id=?",
+                 (rumor_id,))
+            exec(conn,
+                 "INSERT INTO purchases (user_id, kind, rumor_id, created_at) "
+                 "VALUES (?, ?, ?, ?)",
+                 (uid, kind, rumor_id, now))
+
+        elif kind == "bump":
+            if not rumor_id:
+                conn.close()
+                return jsonify({"error": "rumor_id required."}), 400
+            r = exec(conn,
+                "SELECT id, bumped_at FROM rumors WHERE id=? AND user_id=?",
+                (rumor_id, uid)).fetchone()
+            if not r:
+                conn.close()
+                return jsonify({"error": "Rumor not found or not yours."}), 404
+            if r["bumped_at"] and _is_recent(r["bumped_at"], 24):
+                conn.close()
+                return jsonify({"error": "This whisper was bumped recently. Try again later."}), 400
+            exec(conn, "UPDATE rumors SET created_at=?, bumped_at=? WHERE id=?",
+                 (now, now, rumor_id))
+            exec(conn,
+                 "INSERT INTO purchases (user_id, kind, rumor_id, created_at) "
+                 "VALUES (?, ?, ?, ?)",
+                 (uid, kind, rumor_id, now))
+
+        elif kind == "incognito":
+            if not rumor_id:
+                conn.close()
+                return jsonify({"error": "rumor_id required."}), 400
+            r = exec(conn,
+                "SELECT id FROM rumors WHERE id=? AND user_id=?",
+                (rumor_id, uid)).fetchone()
+            if not r:
+                conn.close()
+                return jsonify({"error": "Rumor not found or not yours."}), 404
+            exec(conn, "UPDATE rumors SET is_incognito=1, highlighted=0 "
+                 "WHERE id=?", (rumor_id,))
+            exec(conn,
+                 "INSERT INTO purchases (user_id, kind, rumor_id, created_at) "
+                 "VALUES (?, ?, ?, ?)",
+                 (uid, kind, rumor_id, now))
+
+        elif kind == "featured":
+            expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+            exec(conn,
+                 "INSERT INTO purchases (user_id, kind, created_at, expires_at) "
+                 "VALUES (?, ?, ?, ?)",
+                 (uid, kind, now, expires))
+
+        elif kind.startswith("badge_"):
+            # Purchasable flair badge — check not already owned
+            existing = exec(conn,
+                "SELECT 1 FROM purchases WHERE user_id=? AND kind='badge' AND meta=?",
+                (uid, kind)).fetchone()
+            if existing:
+                conn.close()
+                return jsonify({"error": "You already own this badge."}), 400
+            exec(conn,
+                 "INSERT INTO purchases (user_id, kind, meta, created_at) "
+                 "VALUES (?, ?, ?, ?)",
+                 (uid, "badge", kind, now))
+
+        # Deduct points
+        exec(conn,
+             "UPDATE users SET points_spent = points_spent + ? WHERE id=?",
+             (price, uid))
+        conn.commit()
+        new_points = _compute_points(conn, uid)
+        conn.close()
+        return jsonify({"ok": True, "points": new_points})
+
+
+    # --- Feature 5: Tags + follow-a-tag (Investment / internal trigger) ---
+    @app.get("/api/tags")
+    def list_tags():
+        conn = get_db()
+        rows = exec(conn,
+            "SELECT t.name, COUNT(rt.rumor_id) AS count FROM tags t "
+            "LEFT JOIN rumor_tags rt ON rt.tag_id = t.id "
+            "GROUP BY t.id ORDER BY count DESC, t.name"
+        ).fetchall()
+        conn.close()
+        return jsonify({"tags": [dict(r) for r in rows]})
+
+    @app.post("/api/tags/<name>/follow")
+    def follow_tag(name):
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        name = name.strip().lower()[:20]
+        if not name:
+            return jsonify({"error": "Tag name required."}), 400
+        conn = get_db()
+        tid = _upsert_tag(conn, name)
+        exists = exec(conn,
+            "SELECT 1 FROM tag_follows WHERE user_id=? AND tag_id=?",
+            (session["user_id"], tid)).fetchone()
+        if not exists:
+            exec(conn,
+                "INSERT INTO tag_follows (user_id, tag_id) VALUES (?,?)",
+                (session["user_id"], tid))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "following": name})
+
+    @app.delete("/api/tags/<name>/follow")
+    def unfollow_tag(name):
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        name = name.strip().lower()[:20]
+        conn = get_db()
+        row = exec(conn, "SELECT id FROM tags WHERE name=?",
+                   (name,)).fetchone()
+        if row:
+            exec(conn,
+                "DELETE FROM tag_follows WHERE user_id=? AND tag_id=?",
+                (session["user_id"], row["id"]))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "unfollowed": name})
+
+    @app.get("/api/me/tags")
+    def my_tags():
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        conn = get_db()
+        rows = exec(conn,
+            "SELECT t.name FROM tag_follows tf JOIN tags t ON t.id=tf.tag_id "
+            "WHERE tf.user_id=?", (session["user_id"],)).fetchall()
+        conn.close()
+        return jsonify({"followed_tags": [r["name"] for r in rows]})
+
+
+    @app.post("/api/admin/login")
+    def admin_login():
+        # Admin access is password-only (the owner's secret). No email gate.
+        p = request.get_json(silent=True) or {}
+        if p.get("password") != app.config["ADMIN_PASSWORD"]:
+            return jsonify({"error": "Unauthorized."}), 401
+        session["admin"] = True
+        return jsonify({"ok": True})
+
+    @app.post("/api/forgot-password")
+    def forgot_password():
+        # Privacy-safe: never confirms whether a handle exists. The admin is
+        # notified (log) so they can reset it manually via the admin panel.
+        p = request.get_json(silent=True) or {}
+        handle = (p.get("handle") or "").strip()
+        if not handle:
+            return jsonify({"error": "Handle required."}), 400
+        conn = get_db()
+        row = exec(conn, "SELECT id, handle FROM users WHERE handle=?",
+                   (handle,)).fetchone()
+        conn.close()
+        if row:
+            app.logger.info(
+                "Campus Whispers: password-reset requested for user %s",
+                row["handle"])
+        # Always return the same neutral message (no account enumeration).
+        return jsonify({
+            "ok": True,
+            "message": "If that handle is registered, the admin has been "
+                       "notified and will reset your password."
+        }), 200
+
+    @app.post("/api/admin/users/<int:uid>/reset-password")
+    def admin_reset_password(uid):
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        p = request.get_json(silent=True) or {}
+        new_pw = p.get("new_password") or ""
+        if len(new_pw) < 4:
+            return jsonify({"error": "Password too short (min 4)."}), 400
+        conn = get_db()
+        row = exec(conn, "SELECT id FROM users WHERE id=?", (uid,)).fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "User not found."}), 404
+        exec(conn, "UPDATE users SET password_hash=? WHERE id=?",
+             (generate_password_hash(new_pw), uid))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "reset": uid})
+
+
+    @app.post("/api/admin/digest/send")
+    def admin_digest_send():
+            if not session.get("admin"):
+                return jsonify({"error": "Unauthorized."}), 401
+            p = request.get_json(silent=True) or {}
+            window_hours = int(p.get("window_hours") or 24)
+            conn = get_db()
+            cutoff = (datetime.now(timezone.utc)
+                      - timedelta(hours=window_hours)).isoformat()
+            rows = exec(conn,
+                "SELECT r.id, r.text, r.created_at, u.handle "
+                "FROM rumors r JOIN users u ON u.id = r.user_id "
+                "WHERE u.banned = 0 AND r.created_at >= ? "
+                "ORDER BY r.id DESC",
+                (cutoff,)).fetchall()
+            # Get emails of all non-banned users for digest delivery
+            user_emails = exec(conn,
+                "SELECT email FROM users WHERE banned=0").fetchall()
+            conn.close()
+            if not rows:
+                return jsonify({"ok": True, "sent": 0, "note": "no recent rumors"})
+            body = _render_digest(rows)
+            # Extract email addresses
+            to_addrs = [u["email"] for u in user_emails]
+            # Allow test injection of a fake sender via app.config["MAIL_SENDER"]
+            mailer = app.config.get("MAIL_SENDER")
+            if mailer:
+                for to in to_addrs:
+                    mailer(to, "Campus Whispers — today's top whispers", body)
+                sent = len(to_addrs)
+            else:
+                sent = _send_digest_smtp(app, to_addrs, body)
+            return jsonify({"ok": True, "sent": sent, "rumors": len(rows)})
+
+
+    @app.get("/api/admin/rumors")
+    def admin_rumors():
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        conn = get_db()
+        rows = exec(conn,
+            "SELECT r.id, r.text, r.created_at, u.handle, u.real_name "
+            "FROM rumors r "
+            "JOIN users u ON u.id = r.user_id ORDER BY r.id DESC"
+        ).fetchall()
+        conn.close()
+        return jsonify({"rumors": [rumor_admin(r) for r in rows]})
+
+    @app.delete("/api/admin/rumors/<int:rid>")
+    def admin_delete_rumor(rid):
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        conn = get_db()
+        exec(conn, "DELETE FROM rumors WHERE id=?", (rid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "deleted": rid})
+
+    @app.post("/api/admin/rumors/<int:rid>/feature")
+    def admin_feature_rumor(rid):
+        # Variable-reward surprise: admin (or a future random job) marks a
+        # whisper 'featured' — an unpredictable bonus that drives re-checking.
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        conn = get_db()
+        if not exec(conn, "SELECT 1 FROM rumors WHERE id=?", (rid,)).fetchone():
+            conn.close()
+            return jsonify({"error": "Rumor not found."}), 404
+        exec(conn, "UPDATE rumors SET featured=1 WHERE id=?", (rid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "featured": rid})
+
+    @app.get("/api/admin/users")
+    def admin_users():
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        conn = get_db()
+        rows = exec(conn, 
+            "SELECT id, real_name, email, handle, banned FROM users ORDER BY id"
+        ).fetchall()
+        users = []
+        for r in rows:
+            u = dict(r)
+            u["points"] = _compute_points(conn, u["id"])
+            users.append(u)
+        conn.close()
+        return jsonify({"users": users})
+
+    @app.post("/api/admin/users/<int:uid>/grant-points")
+    def admin_grant_points(uid):
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        payload = request.get_json(silent=True) or {}
+        try:
+            amount = int(payload.get("amount", 0))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid amount."}), 400
+        if amount <= 0:
+            return jsonify({"error": "Amount must be positive."}), 400
+        if amount > 10000:
+            return jsonify({"error": "Amount too large."}), 400
+        conn = get_db()
+        user = exec(conn, "SELECT id, handle, banned FROM users WHERE id=?", (uid,)).fetchone()
+        if not user:
+            conn.close()
+            return jsonify({"error": "User not found."}), 404
+        exec(conn,
+             "UPDATE users SET points_awarded = COALESCE(points_awarded,0) + ? WHERE id=?",
+             (amount, uid))
+        conn.commit()
+        new_points = _compute_points(conn, uid)
+        conn.close()
+        return jsonify({"ok": True, "uid": uid, "points": new_points, "awarded": amount})
+
+    @app.delete("/api/admin/users/<int:uid>")
+    def admin_ban_user(uid):
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        conn = get_db()
+        exec(conn, "UPDATE users SET banned = 1 WHERE id=?", (uid,))
+        exec(conn, "DELETE FROM rumors WHERE user_id=?", (uid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "banned": uid})
+
+    # === Admin: (questions feature removed) ===
+
+    @app.get("/")
+    def index():
+        return serve_page("index.html")
+
+    @app.get("/admin")
+    def admin_page():
+        return serve_page("admin.html")
+
+    @app.after_request
+    def security_headers(resp):
+        # Helmet equivalent for Flask (spec: security headers)
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "connect-src 'self'; "
+            "worker-src 'self'; "
+            "manifest-src 'self'"
+        )
+        return resp
+
+    # Ensure schema exists on startup. Render runs `gunicorn "app:create_app()"`
+    # (create_app is called directly, not run.py), so we must init the DB here
+    # — otherwise tables are never created and every API call 500s.
+    # Tolerate a temporarily-unavailable DB at import time: log and continue
+    # rather than crashing the whole app; per-request calls will surface errors.
+    try:
+        with app.app_context():
+            init_db()
+            if app.config.get("DATABASE_URL"):
+                app.logger.info("Campus Whispers: using Postgres (DATABASE_URL set)")
+            else:
+                app.logger.warning(
+                    "Campus Whispers: DATABASE_URL not set — using SQLite. "
+                    "On Render this is EPHEMERAL and data will be lost on restart."
+                )
+    except Exception as exc:  # pragma: no cover - defensive startup guard
+        app.logger.error("Campus Whispers: DB init failed at startup: %s", exc)
+
+    app.logger.info("Campus Whispers: app started successfully")
+    return app
+
+
+def _render_digest(rows):
+    """Plain-text digest of top rumors (external trigger email body)."""
+    lines = ["Campus Whispers — today's top whispers", "=" * 36, ""]
+    for i, r in enumerate(rows, 1):
+        lines.append(f"{i}. @{r['handle']}: {r['text']}")
+    lines.append("")
+    lines.append("What's the latest secret? Open Campus Whispers.")
+    return "\n".join(lines)
+
+
+def _send_digest_smtp(app, to_addrs, body):
+    """Real SMTP send via smtplib. Config via env: DIGEST_SMTP_HOST,
+    DIGEST_SMTP_PORT, DIGEST_SMTP_USER, DIGEST_SMTP_PASS, DIGEST_FROM.
+    Returns count sent; returns 0 (and logs) if not configured."""
+    import smtplib
+    from email.message import EmailMessage
+    host = app.config.get("DIGEST_SMTP_HOST") or os.environ.get("DIGEST_SMTP_HOST")
+    if not host:
+        app.logger.warning("Campus Whispers: digest SMTP not configured; "
+                           "no emails sent.")
+        return 0
+    port = int(app.config.get("DIGEST_SMTP_PORT")
+               or os.environ.get("DIGEST_SMTP_PORT") or 587)
+    user = app.config.get("DIGEST_SMTP_USER") or os.environ.get("DIGEST_SMTP_USER")
+    pwd = app.config.get("DIGEST_SMTP_PASS") or os.environ.get("DIGEST_SMTP_PASS")
+    frm = app.config.get("DIGEST_FROM") or os.environ.get("DIGEST_FROM") \
+        or (user or "noreply@campus-whispers.app")
+    sent = 0
+    try:
+        with smtplib.SMTP(host, port) as s:
+            if user:
+                s.starttls()
+                s.login(user, pwd)
+            for to in to_addrs:
+                msg = EmailMessage()
+                msg["Subject"] = "Campus Whispers — today's top whispers"
+                msg["From"] = frm
+                msg["To"] = to
+                msg.set_content(body)
+                s.send_message(msg)
+                sent += 1
+    except Exception as exc:  # pragma: no cover - network path
+        app.logger.error("Campus Whispers: digest SMTP failed: %s", exc)
+    return sent
+
+
+def rumor_public(row, conn=None):
+    """Build the public dict for a rumor row. Row must carry handle, custom_alias,
+    highlighted, is_incognito (or we query them when conn is given)."""
+    # Safely get optional columns (sqlite3.Row doesn't have .get())
+    try:
+        custom_alias = row["custom_alias"] if row["custom_alias"] else None
+    except (KeyError, IndexError, TypeError):
+        custom_alias = None
+    try:
+        is_inc = int(row["is_incognito"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        is_inc = 0
+    try:
+        hl = int(row["highlighted"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        hl = 0
+
+    handle = custom_alias if custom_alias else row["handle"]
+    if is_inc:
+        handle = "👻 Ghost"
+        hl = 0  # incognito posts shouldn't glow
+    try:
+        bumped_recent = _is_recent(row["bumped_at"], 1)
+    except (KeyError, IndexError, TypeError, ValueError):
+        bumped_recent = False
+    data = {"id": row["id"], "text": row["text"],
+            "created_at": row["created_at"], "handle": handle,
+            "highlighted": hl,
+            "user_id": row["user_id"],
+            "bumped": bumped_recent}
+    if conn is not None:
+        data["tags"] = _rumor_tags(conn, row["id"])
+        # Variable-reward surprise: is this post featured?
+        frow = exec(conn, "SELECT featured FROM rumors WHERE id=?",
+                    (row["id"],)).fetchone()
+        data["featured"] = int(frow["featured"]) if frow and frow["featured"] is not None else 0
+        # Badge flair: user's selected badge, or highest earned
+        try:
+            uid = row["user_id"]
+            # Read user's selected badge preference
+            srow = exec(conn,
+                "SELECT selected_badge FROM users WHERE id=?", (uid,)
+            ).fetchone()
+            selected = srow[0] if srow and srow[0] else None
+            badge_label = None
+            if selected:
+                # purchased badge
+                if selected in SHOP_ITEMS:
+                    badge_label = SHOP_ITEMS[selected][0]
+                # earned milestone badge
+                if not badge_label:
+                    for key, label, threshold in BADGE_DEFS:
+                        if key == selected:
+                            badge_label = label
+                            break
+            if not badge_label:
+                posts = _count(conn, "SELECT COUNT(*) FROM rumors WHERE user_id=?", (uid,))
+                for key, label, threshold in reversed(BADGE_DEFS):
+                    if posts >= threshold:
+                        badge_label = label
+                        break
+            data["badge_label"] = badge_label
+        except Exception:
+            pass
+    # Rising-star gentle floor: flag posts < 24h old so the UI can soften blank-slate
+    data["is_new"] = _is_new(row["created_at"])
+    return data
+
+
+def _is_recent(iso_ts, hours):
+    """True if the timestamp is within the last `hours` hours."""
+    from datetime import datetime, timezone, timedelta
+    try:
+        ts = datetime.fromisoformat(str(iso_ts).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts) < timedelta(hours=hours)
+    except Exception:
+        return False
+
+
+def _is_new(created_at):
+    """True if the post is less than 24h old."""
+    return _is_recent(created_at, 24)
+
+
+
+def _rumor_tags(conn, rumor_id):
+    rows = exec(conn,
+        "SELECT t.name FROM rumor_tags rt JOIN tags t ON t.id = rt.tag_id "
+        "WHERE rt.rumor_id=?", (rumor_id,)).fetchall()
+    return [r["name"] for r in rows]
+
+
+def _upsert_tag(conn, name):
+    """Insert a tag if absent; return its id (cross-DB safe)."""
+    if _conn_is_pg(conn):
+        cur = exec(conn,
+            "INSERT INTO tags (name) VALUES (?) "
+            "ON CONFLICT (name) DO NOTHING RETURNING id", (name,))
+        row = cur.fetchone()
+        if row:
+            return row["id"]
+        return exec(conn, "SELECT id FROM tags WHERE name=?",
+                    (name,)).fetchone()["id"]
+    exec(conn, "INSERT OR IGNORE INTO tags (name) VALUES (?)", (name,))
+    return exec(conn, "SELECT id FROM tags WHERE name=?",
+               (name,)).fetchone()["id"]
+
+
+
+def _make_teaser(text):
+    """Information-gap teaser: open a curiosity gap without revealing text.
+
+    Shows a short masked fragment + ellipsis so readers feel a knowledge
+    gap (Loewenstein) that pulls them to open the full rumor.
+    """
+    words = text.split()
+    if len(words) <= 4:
+        return "🤫 " + "•" * len(text) + "…"
+    frag = " ".join(words[:4])
+    return f"🤫 {frag}…"
+
+
+def _conn_is_pg(conn):
+    import psycopg
+    return isinstance(conn, psycopg.Connection)
+
+
+def _compute_streak(conn, user_id):
+    """Return (streak, at_risk_today).
+
+    Streak = consecutive distinct UTC calendar days with >=1 post, ending
+    today or yesterday (1-day grace window so a single missed day doesn't
+    shatter the streak — recovery prevents churn per Nikzad 2021).
+    at_risk_today is True when the last post was yesterday: today is the
+    final grace day to keep the streak alive (loss-aversion trigger).
+    """
+    from datetime import datetime, timezone, date, timedelta
+    rows = exec(conn,
+        "SELECT DISTINCT substr(created_at,1,10) AS d FROM rumors "
+        "WHERE user_id=? ORDER BY d DESC", (user_id,)).fetchall()
+    if not rows:
+        return 0, False
+    dates = [r["d"] for r in rows]
+    today = datetime.now(timezone.utc).date()
+    yesterday = today - timedelta(days=1)
+    # group into consecutive-day runs from most recent backward
+    streak = 1
+    for prev, cur in zip(dates, dates[1:]):
+        d_prev = date.fromisoformat(prev)
+        d_cur = date.fromisoformat(cur)
+        if (d_prev - d_cur).days == 1:
+            streak += 1
+        else:
+            break
+    most_recent = date.fromisoformat(dates[0])
+    at_risk = False
+    if most_recent == today:
+        at_risk = False
+    elif most_recent == yesterday:
+        at_risk = True
+    else:
+        streak = 0
+    return streak, at_risk
+
+
+def rumor_admin(row):
+    return {"id": row["id"], "text": row["text"],
+            "created_at": row["created_at"], "handle": row["handle"],
+            "real_name": row["real_name"]}
+
+
+def serve_page(name):
+    path = os.path.join(os.path.dirname(__file__), "static", name)
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+_db_global = None
+# Cached resolved URL so we don't re-compute on every request
+_resolved_pg_url = None
+
+
+def get_db(db_path=None):
+    """Return a connection to whichever DB is configured.
+
+    If DATABASE_URL is set, keep a single persistent psycopg connection
+    (reconnecting transparently); otherwise fall back to local SQLite.
+    """
+
+    # Cache connection per request
+    if db_path is None and 'db' in g:
+        return g.db
+    url = db_path or current_app.config.get("DATABASE_URL")
+    if url:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+
+            if db_path is None:
+                global _db_global, _resolved_pg_url
+                if _db_global is None:
+                    # Build the final URL once for this worker
+                    if _resolved_pg_url is None:
+                        # Use DATABASE_URL as-is — psycopg3 on Python 3.14+ handles SNI natively,
+                        # no IPv4 pinning needed. The pooled URL already has sslmode & options.
+                        _resolved_pg_url = url
+                    _db_global = psycopg.connect(
+                        f"{_resolved_pg_url}&connect_timeout=5",
+                        row_factory=dict_row,
+                    )
+                    # Patch close() to no-op — teardown just pops g.db
+                    _db_global._orig_close = _db_global.close
+                    _db_global.close = lambda: None
+                else:
+                    # Quick ping — if it fails, reconnect once
+                    try:
+                        _db_global.cursor().execute("SELECT 1").fetchone()
+                    except Exception:
+                        try:
+                            _db_global._orig_close()
+                        except Exception:
+                            pass
+                        _db_global = psycopg.connect(
+                            f"{_resolved_pg_url}&connect_timeout=5",
+                            row_factory=dict_row,
+                        )
+                        _db_global._orig_close = _db_global.close
+                        _db_global.close = lambda: None
+                g.db = _db_global
+                return _db_global
+            else:
+                # One-off connection (init_db with custom path)
+                return psycopg.connect(f"{url}&connect_timeout=5", row_factory=dict_row)
+
+        except ImportError:
+            pass  # no psycopg → SQLite fallback
+    # SQLite (local dev)
+    conn = sqlite3.connect(
+        current_app.config["DB_PATH"], timeout=5
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    if db_path is None:
+        g.db = conn
+    return conn
+
+
+def hash_password(pw):
+    return generate_password_hash(pw)
+
+
+def exec(conn, sql, params=()):
+    import psycopg
+    if isinstance(conn, psycopg.Connection):
+        sql = sql.replace("?", "%s")
+    return conn.execute(sql, params)
+
+
+def init_db(db_path=None):
+    conn = get_db(db_path)
+    if isinstance(conn, sqlite3.Connection):
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                real_name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                handle TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                banned INTEGER NOT NULL DEFAULT 0,
+                points INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS rumors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                bumped_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS reactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                rumor_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                UNIQUE(user_id, rumor_id, kind),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (rumor_id) REFERENCES rumors(id)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS me_too (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                rumor_id INTEGER NOT NULL,
+                UNIQUE(user_id, rumor_id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (rumor_id) REFERENCES rumors(id)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                rumor_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (rumor_id) REFERENCES rumors(id)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS rumor_tags (
+                rumor_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY (rumor_id, tag_id),
+                FOREIGN KEY (rumor_id) REFERENCES rumors(id),
+                FOREIGN KEY (tag_id) REFERENCES tags(id)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS tag_follows (
+                user_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY (user_id, tag_id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (tag_id) REFERENCES tags(id)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS challenge_claims (
+                user_id INTEGER NOT NULL,
+                challenge_key TEXT NOT NULL,
+                week TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, challenge_key, week),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )"""
+        )
+        # Bump metadata
+        try:
+            conn.execute("ALTER TABLE rumors ADD COLUMN bumped_at TEXT")
+        except Exception:
+            pass
+        # Variable-reward surprise: featured flag
+        try:
+            conn.execute("ALTER TABLE rumors ADD COLUMN featured INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        # Shop columns
+        for col, typ in [("highlighted", "INTEGER NOT NULL DEFAULT 0"),
+                         ("is_incognito", "INTEGER NOT NULL DEFAULT 0")]:
+            try:
+                conn.execute(f"ALTER TABLE rumors ADD COLUMN {col} {typ}")
+            except Exception:
+                pass
+        for col, typ in [("points", "INTEGER NOT NULL DEFAULT 0"),
+                         ("points_spent", "INTEGER NOT NULL DEFAULT 0"),
+                         ("points_awarded", "INTEGER NOT NULL DEFAULT 0"),
+                         ("custom_alias", "TEXT")]:
+            try:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
+            except Exception:
+                pass
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS purchases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                kind TEXT NOT NULL,
+                rumor_id INTEGER,
+                meta TEXT,
+                created_at TEXT NOT NULL,
+                expires_at TEXT
+            )"""
+        )
+        # Self-heal: add selected_badge column for SQLite
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN selected_badge TEXT DEFAULT NULL")
+        except Exception:
+            pass
+    else:  # Postgres
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                real_name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                handle TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                banned INTEGER NOT NULL DEFAULT 0,
+                points INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        # Self-heal: add email column if it's missing.
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT UNIQUE")
+        except Exception:
+            pass
+        # Self-heal: add selected_badge column
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_badge TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS rumors (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                bumped_at TEXT
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS reactions (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                rumor_id INTEGER NOT NULL REFERENCES rumors(id),
+                kind TEXT NOT NULL,
+                UNIQUE(user_id, rumor_id, kind)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS me_too (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                rumor_id INTEGER NOT NULL REFERENCES rumors(id),
+                UNIQUE(user_id, rumor_id)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS comments (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                rumor_id INTEGER NOT NULL REFERENCES rumors(id),
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS tags (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS rumor_tags (
+                rumor_id INTEGER NOT NULL REFERENCES rumors(id),
+                tag_id INTEGER NOT NULL REFERENCES tags(id),
+                PRIMARY KEY (rumor_id, tag_id)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS tag_follows (
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                tag_id INTEGER NOT NULL REFERENCES tags(id),
+                PRIMARY KEY (user_id, tag_id)
+            )"""
+        )
+        # Bump metadata
+        try:
+            conn.execute("ALTER TABLE rumors ADD COLUMN IF NOT EXISTS bumped_at TEXT")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE rumors ADD COLUMN IF NOT EXISTS featured INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        for col in ["highlighted", "is_incognito"]:
+            try:
+                conn.execute(f"ALTER TABLE rumors ADD COLUMN IF NOT EXISTS {col} INTEGER NOT NULL DEFAULT 0")
+            except Exception:
+                pass
+        for col in ["points", "points_spent", "points_awarded"]:
+            try:
+                conn.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} INTEGER NOT NULL DEFAULT 0")
+            except Exception:
+                pass
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS custom_alias TEXT")
+        except Exception:
+            pass
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS challenge_claims (
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                challenge_key TEXT NOT NULL,
+                week TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, challenge_key, week)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS purchases (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                kind TEXT NOT NULL,
+                rumor_id INTEGER,
+                meta TEXT,
+                created_at TEXT NOT NULL,
+                expires_at TEXT
+            )"""
+        )
+    conn.commit()
+    # Don't close pool connections — the teardown handler returns them
+    # (init_db is called inside app_context so close_db fires on exit)
+
+
+def hash_password(pw):
+    return generate_password_hash(pw)
+
+
+def _generate_handle(conn):
+    """Create a unique random handle (privacy: user doesn't pick/see it)."""
+    import random, string
+    while True:
+        slug = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        handle = f"anon_{slug}"
+        exists = exec(conn, "SELECT 1 FROM users WHERE handle=?",
+                     (handle,)).fetchone()
+        if not exists:
+            return handle
+
+
+# ============================================================
+# Reward system (research-grounded — see engagement-feature-design skill)
+# Points are the engine (correlate with all engagement types); badges are
+# decoration; challenges refresh weekly (beat novelty wear-off); leaderboard
+# is anonymized (privacy prerequisite for an anon board).
+# ============================================================
+
+# Points economy (kept small + legible).
+PTS_POST = 10
+PTS_REACT_GIVEN = 1
+PTS_REACT_RECEIVED = 2
+PTS_METOO_RECEIVED = 2
+
+# Milestone badges: key -> (label, threshold on post count) or custom.
+BADGE_DEFS = [  # (key, label, post threshold)
+    ("first_whisper", "First Whisper", 1),
+    ("ten_whispers", "10 Whispers", 10),
+    ("twenty_five", "Whisper Enthusiast", 25),
+    ("fifty_whispers", "50 Whispers", 50),
+    ("hundred_whispers", "Century Club", 100),
+    ("two_hundred", "Whisper Legend", 200),
+    ("five_hundred", "Anonymous Icon", 500),
+]
+
+# Weekly challenges: key -> (label, goal, reward points, kind).
+CHALLENGE_DEFS = [
+    ("post_3", "Post 3 whispers this week", 3, 30, "post"),
+]
+
+# Shop: item key -> (label, description, price).
+SHOP_ITEMS = {
+    "alias": ("✏️ Custom Alias", "Set a custom display name on your whispers (max 30 chars)", 80),
+    "highlight": ("✨ Highlight Whisper", "Add a glowing border to one of your whispers", 50),
+    "bump": ("⏫ Bump Whisper", "Push one of your whispers back to the top of the feed", 30),
+    "featured": ("👑 Featured Spot", "Featured badge on your profile for 1 week", 200),
+    "incognito": ("👻 Incognito", "Make one whisper show no handle — ghost mode", 150),
+    "badge_smooth": ("Smooth Talker 🎩", "Equip the Smooth Talker badge as your flair", 100),
+    "badge_mystery": ("Mystery Guest 🎭", "Equip the Mystery Guest badge as your flair", 150),
+    "badge_veteran": ("Veteran 👑", "Equip the Veteran badge as your flair", 200),
+}
+
+
+def _current_week():
+    """ISO year-week string, e.g. '2026-W29' — used to scope challenges."""
+    from datetime import datetime, timezone
+    iso = datetime.now(timezone.utc).isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def _week_start_iso():
+    """UTC midnight of Monday this week, ISO string for created_at compares."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    monday = now - timedelta(days=now.weekday())
+    monday = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    return monday.isoformat()
+
+
+def _count(conn, sql, params):
+    row = exec(conn, sql, params).fetchone()
+    if not row:
+        return 0
+    # row may be a dict-like or tuple depending on driver
+    try:
+        return int(row[0]) if not hasattr(row, "keys") else int(list(row)[0])
+    except Exception:
+        return int(row["c"]) if "c" in getattr(row, "keys", lambda: [])() else 0
+
+
+def _compute_points(conn, user_id):
+    """Sum a user's points from their activity across existing tables."""
+    posts = _count(conn, "SELECT COUNT(*) FROM rumors WHERE user_id=?", (user_id,))
+    react_given = _count(conn, "SELECT COUNT(*) FROM reactions WHERE user_id=?", (user_id,))
+    react_recv = _count(conn,
+        "SELECT COUNT(*) FROM reactions rx JOIN rumors r ON r.id=rx.rumor_id "
+        "WHERE r.user_id=?", (user_id,))
+    metoo_recv = _count(conn,
+        "SELECT COUNT(*) FROM me_too m JOIN rumors r ON r.id=m.rumor_id "
+        "WHERE r.user_id=?", (user_id,))
+    # claimed challenge rewards
+    claim_pts = 0
+    rows = exec(conn,
+        "SELECT challenge_key FROM challenge_claims WHERE user_id=?",
+        (user_id,)).fetchall()
+    reward_by_key = {c[0]: c[3] for c in CHALLENGE_DEFS}
+    for r in rows:
+        key = r[0] if not hasattr(r, "keys") else r["challenge_key"]
+        claim_pts += reward_by_key.get(key, 0)
+    earned = (posts * PTS_POST +
+              react_given * PTS_REACT_GIVEN + react_recv * PTS_REACT_RECEIVED +
+              metoo_recv * PTS_METOO_RECEIVED + claim_pts)
+    # admin-awarded bonus points
+    row_aw = exec(conn, "SELECT points_awarded FROM users WHERE id=?", (user_id,)).fetchone()
+    if row_aw is None:
+        return 0
+    awarded = row_aw[0] if not hasattr(row_aw, "keys") else row_aw["points_awarded"]
+    # subtract points spent in the shop
+    row = exec(conn, "SELECT points_spent FROM users WHERE id=?", (user_id,)).fetchone()
+    if row is None:
+        return 0
+    spent = row[0] if not hasattr(row, "keys") else row["points_spent"]
+    total = max(earned + awarded - spent, 0)
+    exec(conn, "UPDATE users SET points=? WHERE id=?", (total, user_id))
+    return total
+
+
+def _compute_badges(conn, user_id):
+    """Return unlocked badges (list of {key,label}) — earned + purchased."""
+    posts = _count(conn, "SELECT COUNT(*) FROM rumors WHERE user_id=?", (user_id,))
+    out = []
+    for key, label, threshold in BADGE_DEFS:
+        if posts >= threshold:
+            out.append({"key": key, "label": label})
+    # Include purchased flair badges
+    rows = exec(conn,
+        "SELECT meta FROM purchases WHERE user_id=? AND kind='badge'",
+        (user_id,)).fetchall()
+    for r in rows:
+        k = r[0] if not hasattr(r, "keys") else r["meta"]
+        if k in SHOP_ITEMS:
+            label = SHOP_ITEMS[k][0]
+            out.append({"key": k, "label": label})
+    return out
+
+
+def _challenge_progress(conn, user_id, kind):
+    """Count this-week activity for a challenge kind."""
+    ws = _week_start_iso()
+    if kind == "post":
+        return _count(conn,
+            "SELECT COUNT(*) FROM rumors WHERE user_id=? AND created_at>=?",
+            (user_id, ws))
+    if kind == "react":
+        # reactions table has no created_at; count all this user's reactions
+        return _count(conn, "SELECT COUNT(*) FROM reactions WHERE user_id=?",
+                      (user_id,))
+    return 0
+
+
+def _user_rank(conn, user_id):
+    """1-based rank of a user by points (higher points = better rank)."""
+    row = exec(conn,
+        "SELECT COUNT(*) + 1 FROM users WHERE banned=0 AND points > "
+        "(SELECT points FROM users WHERE id=?)",
+        (user_id,)).fetchone()
+    return row[0] if row else None

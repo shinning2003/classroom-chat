@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+*.db-journal
+server.log
+cj.txt
+neon_cs_final.json
+.neon_cs*
+get_neon_cs.py
+*.pyc
+.neon_hex
+neon_cs.py

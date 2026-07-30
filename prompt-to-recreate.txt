@@ -1,0 +1,209 @@
+# Build "Whisper Room — Anonymous Confession Board"
+
+## What This App Is
+
+A private, anonymous confession & gossip board for a college batch (like a class of ~60 students). Students register with their real identity but post anonymously under a chosen alias. Think "campus secret sharing" but with accountability — the batch admin can see who's behind every post, but regular students only see the alias. A gamified reputation system rewards positive participation.
+
+---
+
+## Who It's For
+
+A specific college batch — e.g. "B.Sc Computer Science 2023-2026 batch." Everyone knows everyone in the batch. The app is a shared space for confessions, rumors, compliments, jokes, opinions, and inside jokes — things you'd say to your class but not with your real name on it.
+
+---
+
+## Core Identity Rule
+
+- **Registration requires:** Real name, email, alias (public handle), and password.
+- **Public face:** Only the alias is shown on posts. Never the real name or email.
+- **Batch admin:** A designated person (usually the class rep or a trusted student) can see everyone's real identities behind their aliases. Admin can ban troublemakers, award bonus points, and delete inappropriate posts.
+- **Why:** Anonymity for expression + accountability against abuse.
+
+---
+
+## Visual Theme
+
+**Dark, modern, cyber-ish — like a nighttime rooftop conversation.**
+
+- Background: Very dark navy/charcoal (`#0a0f1a`)
+- Cards/surfaces: Darker blue-gray (`#111827`, `#1a2332`)
+- Accent color: Bright cyan/neon blue (`#00d4ff`) — glows subtly
+- Text: Off-white (`#e2e8f0`), muted text in slate gray
+- Borders: Subtle dark blue-gray lines
+- Rounded corners: 8–12px on everything
+- Icons: Simple SVG inline icons (home, star/achievement, profile)
+- Font: System font stack (clean, readable)
+
+**Mood: "Late night hostel room, phone under the blanket, everyone's sharing secrets."**
+
+---
+
+## User Interface (Mobile-First SPA)
+
+A single-page app with a bottom tab bar. All content loads without page refreshes (JSON API consumed by vanilla JS). Works great on phones, usable on desktop.
+
+### Three Tabs:
+
+#### 1. Chat Tab (💬) — The Feed
+- Scrollable feed of anonymous posts, newest activity first.
+- Each post card shows: alias, timestamp, post text, reaction buttons, "me too" button, comment count.
+- Tags displayed on posts (e.g., #confession #joke #crush).
+- Compose bar at the bottom: type a message (max 500 chars), press send → appears in feed instantly.
+- Tap a post to expand it → view comments, add a comment.
+
+#### 2. Reward Tab (🏆) — Gamification Hub
+- Your current points and rank displayed at the top.
+- **Badges:** A grid of achievement badges based on how many posts you've made. Tap to select one as your flair (shows next to your alias on posts).
+- **Weekly Challenges:** Time-limited bonus point opportunities (e.g., "Post 3 times this week").
+- **Leaderboard:** Top 10 students ranked by points — but anonymized as "Player #1", "Player #2" etc. You can see your own spot but not others' identities.
+- **Recently Bumped:** Posts that people have boosted recently.
+- **Shop:** Spend points on perks like:
+  - Spotlight your profile (24h featured badge)
+  - Custom alias color
+  - Custom badge emoji
+  - Profile glow effect
+
+#### 3. Profile Tab (👤) — Your Stats
+- Your alias, total posts, points, rank, streak (consecutive days you've posted)
+- Badges you've earned
+- Your recent whispers (your own posts)
+
+### Bottom Navigation Bar
+- Three buttons with icons + labels: Chat / Reward / Profile
+- Active tab is highlighted with the accent color
+- Compose bar appears only on the Chat tab
+
+### Login/Register Screen
+- Toggle between Login and Register modes
+- Register: Real name, email, alias (3-20 chars, letters/numbers/underscores), password
+- Login: Email or alias + password
+- Smooth transition, no page reload
+
+---
+
+## Features in Detail
+
+### 1. Anonymous Posting
+- Anyone logged in can post a confession/rumor/thought anonymously (max 500 chars)
+- Optional tags (#crush, #confession, #joke, #vent, etc.)
+- Your alias shows on the post — not your real name
+- Only you and the admin know you wrote it
+
+### 2. Reactions (Not Comments, Just Vibes)
+- Four reaction types: Agree 👍, LOL 😂, Wow 😮, Sad 😢
+- Tap to react, tap again to un-react
+- Counts shown on each post
+- Reacting gives you +1 point (encourages engagement)
+
+### 3. "Me Too" Button
+- Express solidarity — "I feel the same way"
+- Toggle on/off. Count shown on post.
+- Receiving a "me too" gives the poster +2 points
+
+### 4. Comments (For Actual Replies)
+- Any logged-in user can comment on any post (max 200 chars)
+- Comments show the commenter's alias — not anonymous within comments
+- Tap a post to expand and view/add comments
+
+### 5. Bumping (Pay to Promote)
+- Spend 2 points to "bump" a post to the top of the feed
+- The bumped_at timestamp updates, pushing it to the top
+- A way to give old posts new life
+
+### 6. Tag System
+- Posts can have tags. Tags are created on the fly.
+- Follow tags to curate your feed (e.g., follow only #confession)
+- Filter the feed by tag: `/feed?tag=confession`
+
+### 7. Scoring & Leveling
+
+**How points work:**
+
+| Action | Points |
+|--------|--------|
+| Create a post | +5 |
+| React to someone's post | +1 |
+| Someone reacts to YOUR post | +1 per reaction |
+| Someone says "Me Too" to YOUR post | +2 |
+| Complete a weekly challenge | +5 to +15 |
+| Admin awards you bonus points | Any amount |
+| Buying shop items | Costs points |
+
+Points determine your rank and what badges you unlock.
+
+**Badge tiers (based on total posts):**
+- 5 posts → Bronze badge
+- 10 posts → Silver badge
+- 25 posts → Gold badge
+- 50 posts → Platinum badge
+- 100 posts → Diamond badge
+
+### 8. Weekly Challenges
+- A few challenges refresh weekly (e.g., "Post 3 times", "React to 5 posts")
+- Claim rewards when completed
+- Encourages ongoing engagement
+
+### 9. Leaderboard (Anonymized)
+- Top 10 by points
+- Shows "Player #1", "Player #2" etc. — never real aliases
+- If you're in the top 10, you can identify your own entry
+- No drama — you can't see who's ahead of you by name
+
+### 10. Shop
+- Spend your points on cosmetic perks
+- **Featured Spotlight** (100pts): Your profile highlighted for 24h
+- **Custom Alias** (200pts): Change your displayed alias
+- **Name Color** (150pts): Colored alias on your posts
+- **Badge Emoji** (250pts): Custom emoji for your badge
+- **Profile Glow** (300pts): Glow effect on your profile card
+
+### 11. Admin Panel (Hidden)
+- Activated by logging in with the admin handle
+- Admin can:
+  - See real names and emails behind every alias
+  - Delete any post
+  - Feature a post (pin to top)
+  - Award bonus points to anyone
+  - Ban/unban users
+  - Reset passwords
+- No special admin login page — admins use the same login but get extra controls
+
+### 12. Password Reset
+- Self-service: enter your email, get a reset link
+- Admin can also reset any user's password
+
+---
+
+## How It Works (Technical Overview for the AI)
+
+- **Backend:** Python Flask app, single file. JSON API. Session-based auth with cookies (30-day expiry).
+- **Database:** Dual-mode — PostgreSQL for production, SQLite for local development. Auto-detected via environment variable. Schema created automatically on first run.
+- **Frontend:** Single HTML file with embedded CSS and JavaScript. No frameworks. No build step. Vanilla JS SPA that calls the JSON API.
+- **Key Architecture Rules:**
+  - No polling, no live sync, no WebSockets. Data is fetched only on user action (page load, tab switch, post, react).
+  - Only one database connection at a time — single persistent connection, not a pool.
+  - Points are cached in the users table and recalculated on every profile load.
+  - Leaderboard ranking uses a single COUNT query — no looping over every user.
+
+---
+
+## Non-Negotiable Details
+
+1. The app MUST work both locally (SQLite) and in production (PostgreSQL) without code changes. Use auto-detection.
+2. Sessions must persist for 30 days. Don't log users out every day.
+3. The admin sees real identities but regular users NEVER see real names or emails.
+4. Leaderboard is anonymized — "Player #1" style, never real aliases.
+5. No background network activity. No polling. No periodic updates.
+6. Points must be cached in a database column (not computed from scratch every time).
+7. Rank must use a single COUNT query, not a loop over all users.
+8. The dark theme is mandatory. No light mode.
+9. Mobile-first design — bottom nav, single column, touch-friendly buttons.
+10. Posts max 500 chars. Comments max 200 chars. Keep it tight.
+
+---
+
+## What to Generate
+
+Build the complete app from scratch as a single HTML file with embedded CSS + JavaScript, and a single Python backend file. Make it fully functional end-to-end:
+
+1. Register a new account → 2. Log in → 3. See the empty feed → 4. Write a post → 5. See it appear → 6. React to it → 7. Comment on it → 8. Check your points and rank → 9. View the leaderboard → 10. Try the admin panel.

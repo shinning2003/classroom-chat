@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: campus-whispers
+    runtime: python3.13
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:create_app() --bind 0.0.0.0:$PORT
+    healthCheckPath: /api/me
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+    disk:
+      mountLocation: /data
+      sizeGB: 1
