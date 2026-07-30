@@ -1087,8 +1087,9 @@ def get_db(db_path=None):
                         except socket.gaierror:
                             # No IPv4 address — use hostname as-is (e.g. Render internal Postgres)
                             _resolved_pg_url = url
+                    _conn_timeout = f"{'&' if '?' in _resolved_pg_url else '?'}connect_timeout=5"
                     _db_global = psycopg.connect(
-                        f"{_resolved_pg_url}&connect_timeout=5",
+                        f"{_resolved_pg_url}{_conn_timeout}",
                         row_factory=dict_row,
                     )
                     # Patch close() to no-op — teardown just pops g.db
@@ -1103,8 +1104,9 @@ def get_db(db_path=None):
                             _db_global._orig_close()
                         except Exception:
                             pass
+                        _conn_timeout = f"{'&' if '?' in _resolved_pg_url else '?'}connect_timeout=5"
                         _db_global = psycopg.connect(
-                            f"{_resolved_pg_url}&connect_timeout=5",
+                            f"{_resolved_pg_url}{_conn_timeout}",
                             row_factory=dict_row,
                         )
                         _db_global._orig_close = _db_global.close
@@ -1113,7 +1115,9 @@ def get_db(db_path=None):
                 return _db_global
             else:
                 # One-off connection (init_db with custom path)
-                return psycopg.connect(f"{url}&connect_timeout=5", row_factory=dict_row)
+                return psycopg.connect(
+                    f"{url}{'&' if '?' in url else '?'}connect_timeout=5",
+                    row_factory=dict_row)
 
         except ImportError:
             pass  # no psycopg → SQLite fallback
