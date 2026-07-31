@@ -860,7 +860,7 @@ def create_app(config=None):
             conn.commit()
             conv_id = cur.fetchone()["id"]
         else:
-            exec(conn, "INSERT INTO conversations (created_at) VALUES (?)", (now,))
+            cur = exec(conn, "INSERT INTO conversations (created_at) VALUES (?)", (now,))
             conn.commit()
             conv_id = cur.lastrowid
         # Add participants
