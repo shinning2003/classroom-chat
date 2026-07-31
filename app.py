@@ -380,23 +380,73 @@ def create_app(config=None):
             "AND (expires_at IS NULL OR expires_at > ?)", (now_iso,)
         ).fetchall():
             featured_users.add(r[0] if not hasattr(r, "keys") else r["user_id"])
-        # Use the cached points column instead of recomputing for every user
-        scored_rows = exec(conn,
-            "SELECT id, points FROM users WHERE banned=0 "
-            "ORDER BY points DESC, id"
-        ).fetchall()
+        # Compute points fresh in one pass (the cached users.points column is
+        # never committed, so it would show stale zeros). Aggregate each
+        # activity table with GROUP BY, then combine in Python.
+        score = {}
+        for r in exec(conn,
+            "SELECT id, points_awarded, points_spent FROM users WHERE banned=0"
+        ).fetchall():
+            score[r["id"]] = {
+                "earned": 0,
+                "awarded": r["points_awarded"] or 0,
+                "spent": r["points_spent"] or 0,
+            }
+        def add(rows, mul):
+            for r in rows:
+                uid = r["user_id"]
+                if uid in score:
+                    score[uid]["earned"] += r["n"] * mul
+        add(exec(conn,
+            "SELECT user_id, COUNT(*) AS n FROM room_messages GROUP BY user_id"
+        ).fetchall(), PTS_POST)
+        add(exec(conn,
+            "SELECT user_id, COUNT(*) AS n FROM rumors GROUP BY user_id"
+        ).fetchall(), PTS_POST)
+        add(exec(conn,
+            "SELECT user_id, COUNT(*) AS n FROM reactions GROUP BY user_id"
+        ).fetchall(), PTS_REACT_GIVEN)
+        add(exec(conn,
+            "SELECT r.user_id, COUNT(*) AS n FROM reactions rx "
+            "JOIN rumors r ON r.id = rx.rumor_id GROUP BY r.user_id"
+        ).fetchall(), PTS_REACT_RECEIVED)
+        add(exec(conn,
+            "SELECT r.user_id, COUNT(*) AS n FROM me_too m "
+            "JOIN rumors r ON r.id = m.rumor_id GROUP BY r.user_id"
+        ).fetchall(), PTS_METOO_RECEIVED)
+        reward_by_key = {c[0]: c[3] for c in CHALLENGE_DEFS}
+        for r in exec(conn,
+            "SELECT user_id, challenge_key FROM challenge_claims"
+        ).fetchall():
+            uid = r["user_id"]
+            if uid in score:
+                score[uid]["earned"] += reward_by_key.get(r["challenge_key"], 0)
         conn.close()
+        scored = sorted(
+            ((uid, max(v["earned"] + v["awarded"] - v["spent"], 0))
+             for uid, v in score.items()),
+            key=lambda t: (-t[1], t[0]))
         # Anonymized: alias only (Player #N), never the handle/email/real_name.
         out = []
-        for i, row in enumerate(scored_rows[:10], start=1):
-            uid = row[0] if not hasattr(row, "keys") else row["id"]
-            pts = row[1] if not hasattr(row, "keys") else row["points"]
+        viewer_uid = session.get("user_id")
+        viewer_seen = False
+        for i, (uid, pts) in enumerate(scored[:10], start=1):
             entry = {"rank": i, "alias": f"Player #{i}", "points": pts}
             if uid in featured_users:
                 entry["featured"] = True
-            if session.get("user_id") and uid == session["user_id"]:
+            if viewer_uid and uid == viewer_uid:
                 entry["is_me"] = True
+                viewer_seen = True
             out.append(entry)
+        # Always include the viewer's own rank, even outside the top 10.
+        if viewer_uid and not viewer_seen:
+            for i, (uid, pts) in enumerate(scored, start=1):
+                if uid == viewer_uid:
+                    entry = {"rank": i, "alias": f"Player #{i}", "points": pts, "is_me": True}
+                    if uid in featured_users:
+                        entry["featured"] = True
+                    out.append(entry)
+                    break
         return jsonify({"leaderboard": out})
 
     @app.post("/api/badge/select")
@@ -2157,6 +2207,9 @@ def _compute_points(conn, user_id):
     spent = row[0] if not hasattr(row, "keys") else row["points_spent"]
     total = max(earned + awarded - spent, 0)
     exec(conn, "UPDATE users SET points=? WHERE id=?", (total, user_id))
+    # Commit the cache write here — the leaderboard and rank queries read
+    # users.points, and without a commit they see stale zeros on both DBs.
+    conn.commit()
     return total
 
 
