@@ -16,6 +16,13 @@
 :root{--bg:#0a0f1a;--surface:#111827;--surface2:#1a2332;--accent:#00d4ff;--accent-glow:#00d4ff33;--text:#e2e8f0;--muted:#64748b;--border:#1e293b;--radius:10px;--danger:#ef4444;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
 .hidden{display:none!important}
+
+/* Splash: shown while the saved session is restored, so the login
+   screen never flashes on reload for users who are already signed in */
+#splash{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:999}
+#splash h1{font-size:26px;background:linear-gradient(135deg,var(--accent),#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.spinner{width:28px;height:28px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 .btn{display:inline-flex;align-items:center;gap:6px;padding:10px 20px;border-radius:var(--radius);border:none;cursor:pointer;font-size:14px;font-weight:600;transition:.15s}
 .btn-primary{background:var(--accent);color:#0a0f1a}.btn-primary:hover{box-shadow:0 0 16px var(--accent-glow)}
 .btn-ghost{background:var(--surface2);color:var(--text);border:1px solid var(--border)}.btn-ghost:hover{background:var(--border)}
@@ -120,7 +127,12 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
 </head>
 <body>
 
-<div id="auth-screen">
+<div id="splash">
+  <h1>💬 Whisper Room</h1>
+  <div class="spinner"></div>
+</div>
+
+<div id="auth-screen" class="hidden">
   <h1>Whisper Room</h1>
   <p class="sub">Anonymous confessions. Real accountability.</p>
   <div class="auth-card" id="login-form">
@@ -295,7 +307,7 @@ async function togglePush(){
 
 /* Auth */
 function showRegister(){ $('login-form').classList.add('hidden'); $('register-form').classList.remove('hidden'); $('forgot-form').classList.add('hidden'); }
-function showLogin(){ $('login-form').classList.remove('hidden'); $('register-form').classList.add('hidden'); $('forgot-form').classList.add('hidden'); }
+function showLogin(){ $('splash').classList.add('hidden'); $('auth-screen').classList.remove('hidden'); $('login-form').classList.remove('hidden'); $('register-form').classList.add('hidden'); $('forgot-form').classList.add('hidden'); }
 function showForgot(){ $('login-form').classList.add('hidden'); $('register-form').classList.add('hidden'); $('forgot-form').classList.remove('hidden'); }
 
 async function register(){
@@ -342,12 +354,15 @@ function logout(){
 }
 
 // Auto-login: the server keeps a 30-day session cookie, so restore the
-// session on every load instead of forcing a fresh login.
+// session on every load instead of forcing a fresh login. The splash
+// stays up until this resolves — no login-screen flash on reload.
 (async function restoreSession(){
   try {
     const d = await api('GET', '/api/me');
     if(d && d.handle){ enterApp(d.handle); }
-  } catch(e){ /* no valid session — stay on the auth screen */ }
+    else { showLogin(); }
+  } catch(e){ showLogin(); }
+  finally { $('splash').classList.add('hidden'); }
 })();
 
 async function enterApp(handle){
