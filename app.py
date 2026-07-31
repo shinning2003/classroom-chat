@@ -995,33 +995,12 @@ def create_app(config=None):
 
     # === End Chat section ===
 
-    # Ensure schema exists on startup.
-    # (create_app is called directly, not run.py), so we must init the DB here
-    # — otherwise tables are never created and every API call 500s.
-    # Run it in a BACKGROUND THREAD so gunicorn binds the port instantly:
-    # DNS resolution inside psycopg.connect() is not reliably covered by
-    # connect_timeout, and a slow resolver would block create_app() for many
-    # minutes, blowing past Render's port-scan timeout and failing the deploy.
-    # Tolerate a temporarily-unavailable DB: retry in a loop, log and continue;
-    # per-request calls will surface errors until the DB is reachable.
-    def _startup_db_init():
-        while True:
-            try:
-                with app.app_context():
-                    init_db()
-                    if app.config.get("DATABASE_URL"):
-                        app.logger.info("Campus Whispers: using Postgres (DATABASE_URL set)")
-                    else:
-                        app.logger.warning(
-                            "Campus Whispers: DATABASE_URL not set — using SQLite. "
-                            "On Render this is EPHEMERAL and data will be lost on restart."
-                        )
-                    return
-            except Exception as e:
-                app.logger.warning(f"Startup DB init failed (retrying in 10s): {e}")
-                time.sleep(10)
-
-    threading.Thread(target=_startup_db_init, daemon=True).start()
+    # Schema is ensured lazily in get_db() on the first DB connection
+    # (init_db(conn=...) after connect). Running it in a background thread
+    # here shared the psycopg connection with request threads — psycopg3
+    # connections are not thread-safe, and concurrent use deadlocked
+    # requests for 60s (gunicorn timeout). Deploys still boot fast because
+    # create_app() itself never touches the DB.
 
     app.logger.info("Campus Whispers: app started successfully")
     return app
@@ -1379,6 +1358,10 @@ def get_db(db_path=None):
                     # Patch close() to no-op — teardown just pops g.db
                     _db_global._orig_close = _db_global.close
                     _db_global.close = lambda: None
+                    # Ensure schema on this fresh connection (single worker,
+                    # so no concurrent access; the old background thread
+                    # shared the conn with requests and deadlocked psycopg).
+                    init_db(conn=_db_global)
                 else:
                     # Quick ping — if it fails, reconnect once
                     try:
@@ -1416,6 +1399,7 @@ def get_db(db_path=None):
     conn.execute("PRAGMA journal_mode=WAL")
     if db_path is None:
         g.db = conn
+        init_db(conn=conn)  # ensure local schema (startup init was removed)
     return conn
 
 
@@ -1430,8 +1414,8 @@ def exec(conn, sql, params=()):
     return conn.execute(sql, params)
 
 
-def init_db(db_path=None):
-    conn = get_db(db_path)
+def init_db(db_path=None, conn=None):
+    conn = conn or get_db(db_path)
     if isinstance(conn, sqlite3.Connection):
         conn.execute(
             """CREATE TABLE IF NOT EXISTS users (
