@@ -1158,7 +1158,7 @@ def rumor_public(row, conn=None):
             srow = exec(conn,
                 "SELECT selected_badge FROM users WHERE id=?", (uid,)
             ).fetchone()
-            selected = srow[0] if srow and srow[0] else None
+            selected = (srow["selected_badge"] if srow and srow["selected_badge"] else None)
             badge_label = None
             if selected:
                 # purchased badge
@@ -1889,11 +1889,15 @@ def _count(conn, sql, params):
     row = exec(conn, sql, params).fetchone()
     if not row:
         return 0
-    # row may be a dict-like or tuple depending on driver
+    # row may be a dict-like (psycopg dict_row) or sqlite3.Row/tuple
     try:
-        return int(row[0]) if not hasattr(row, "keys") else int(list(row)[0])
+        if isinstance(row, dict):
+            vals = list(row.values())
+        else:
+            vals = list(row)
+        return int(vals[0]) if vals else 0
     except Exception:
-        return int(row["c"]) if "c" in getattr(row, "keys", lambda: [])() else 0
+        return 0
 
 
 def _compute_points(conn, user_id):
