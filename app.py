@@ -10,10 +10,7 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, jsonify, request, session, current_app, g
-from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import generate_password_hash, check_password_hash
-
-socketio = SocketIO()
 
 
 def create_app(config=None):
@@ -29,8 +26,6 @@ def create_app(config=None):
     )
     if config:
         app.config.update(config)
-
-    socketio.init_app(app, cors_allowed_origins="*")
 
     @app.before_request
     def persist_session():
@@ -808,112 +803,6 @@ def create_app(config=None):
         )
         return resp
 
-    # === SocketIO: Real-time messaging ===
-
-    @socketio.on('connect')
-    def chat_connect():
-        if not session.get('user_id'):
-            return False  # reject
-        uid = session['user_id']
-        # Join a personal room for DM delivery
-        join_room(f'user_{uid}')
-
-    @socketio.on('disconnect')
-    def chat_disconnect():
-        pass
-
-    @socketio.on('send_message')
-    def handle_message(data):
-        """Send a message in a conversation."""
-        uid = session.get('user_id')
-        if not uid:
-            emit('error', {'message': 'Not authenticated'})
-            return
-        conv_id = data.get('conversation_id')
-        text = (data.get('text') or '').strip()
-        if not conv_id or not text:
-            emit('error', {'message': 'conversation_id and text required'})
-            return
-        # Verify user is a participant
-        conn = get_db()
-        import psycopg
-        is_pg = isinstance(conn, psycopg.Connection)
-        row = exec(conn,
-            "SELECT 1 FROM conversation_participants "
-            "WHERE conversation_id=? AND user_id=?",
-            (conv_id, uid)).fetchone()
-        if not row:
-            conn.close()
-            emit('error', {'message': 'Not a participant'})
-            return
-        created_at = datetime.now(timezone.utc).isoformat()
-        if is_pg:
-            cur = exec(conn,
-                "INSERT INTO messages (conversation_id, sender_id, text, created_at) "
-                "VALUES (?,?,?,?) RETURNING id",
-                (conv_id, uid, text, created_at))
-            conn.commit()
-            mid = cur.fetchone()["id"]
-        else:
-            cur = exec(conn,
-                "INSERT INTO messages (conversation_id, sender_id, text, created_at) "
-                "VALUES (?,?,?,?)",
-                (conv_id, uid, text, created_at))
-            conn.commit()
-            mid = cur.lastrowid
-        # Get sender handle
-        handle_row = exec(conn, "SELECT handle FROM users WHERE id=?", (uid,)).fetchone()
-        handle = handle_row["handle"] if handle_row else "unknown"
-        conn.close()
-        # Broadcast to conversation room AND the sender's personal room
-        payload = {
-            "id": mid, "conversation_id": conv_id,
-            "sender_id": uid, "sender_handle": handle,
-            "text": text, "created_at": created_at
-        }
-        emit('new_message', payload, room=f'conv_{conv_id}')
-        emit('new_message', payload, room=f'user_{uid}')
-
-    @socketio.on('join_conversation')
-    def handle_join(data):
-        uid = session.get('user_id')
-        if not uid:
-            return False
-        conv_id = data.get('conversation_id')
-        if not conv_id:
-            return
-        # Verify participant
-        conn = get_db()
-        row = exec(conn,
-            "SELECT 1 FROM conversation_participants "
-            "WHERE conversation_id=? AND user_id=?",
-            (conv_id, uid)).fetchone()
-        conn.close()
-        if row:
-            join_room(f'conv_{conv_id}')
-
-    @socketio.on('typing')
-    def handle_typing(data):
-        uid = session.get('user_id')
-        if not uid:
-            return
-        conv_id = data.get('conversation_id')
-        is_typing = data.get('is_typing', False)
-        if not conv_id:
-            return
-        # Get sender handle
-        conn = get_db()
-        handle_row = exec(conn, "SELECT handle FROM users WHERE id=?", (uid,)).fetchone()
-        handle = handle_row["handle"] if handle_row else "unknown"
-        conn.close()
-        # Broadcast to OTHER participants in the conv room
-        emit('typing', {
-            'conversation_id': conv_id,
-            'sender_id': uid,
-            'sender_handle': handle,
-            'is_typing': is_typing,
-        }, room=f'conv_{conv_id}', include_self=False)
-
     # === REST endpoints for conversations ===
 
     @app.get("/api/users/search")
@@ -1055,7 +944,53 @@ def create_app(config=None):
         } for r in reversed(rows)]
         return jsonify({"messages": msgs})
 
-    # === End SocketIO / Chat section ===
+    @app.post("/api/conversations/<int:conv_id>/messages")
+    def send_message(conv_id):
+        """Send a message in a conversation."""
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        uid = session["user_id"]
+        p = request.get_json(silent=True) or {}
+        text = (p.get("text") or "").strip()
+        if not text:
+            return jsonify({"error": "Message text required."}), 400
+        conn = get_db()
+        import psycopg
+        is_pg = isinstance(conn, psycopg.Connection)
+        # Verify user is a participant
+        row = exec(conn,
+            "SELECT 1 FROM conversation_participants "
+            "WHERE conversation_id=? AND user_id=?",
+            (conv_id, uid)).fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Not a participant."}), 403
+        created_at = datetime.now(timezone.utc).isoformat()
+        if is_pg:
+            cur = exec(conn,
+                "INSERT INTO messages (conversation_id, sender_id, text, created_at) "
+                "VALUES (?,?,?,?) RETURNING id",
+                (conv_id, uid, text, created_at))
+            conn.commit()
+            mid = cur.fetchone()["id"]
+        else:
+            cur = exec(conn,
+                "INSERT INTO messages (conversation_id, sender_id, text, created_at) "
+                "VALUES (?,?,?,?)",
+                (conv_id, uid, text, created_at))
+            conn.commit()
+            mid = cur.lastrowid
+        # Get sender handle
+        handle_row = exec(conn, "SELECT handle FROM users WHERE id=?", (uid,)).fetchone()
+        handle = handle_row["handle"] if handle_row else "unknown"
+        conn.close()
+        return jsonify({
+            "id": mid, "conversation_id": conv_id,
+            "sender_id": uid, "sender_handle": handle,
+            "text": text, "created_at": created_at,
+        }), 201
+
+    # === End Chat section ===
 
     # Ensure schema exists on startup.
     # (create_app is called directly, not run.py), so we must init the DB here

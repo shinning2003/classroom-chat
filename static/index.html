@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>Whisper Room</title>
-<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#0a0f1a;--surface:#111827;--surface2:#1a2332;--accent:#00d4ff;--accent-glow:#00d4ff33;--text:#e2e8f0;--muted:#64748b;--border:#1e293b;--radius:10px;--danger:#ef4444;}
@@ -345,7 +344,6 @@ async function forgotPassword(){
 
 function logout(){
   state.user = null;
-  disconnectSocket();
   $('app').classList.add('hidden');
   $('auth-screen').classList.remove('hidden');
   $('login-id').value = '';
@@ -357,7 +355,6 @@ async function enterApp(handle){
   $('app').classList.remove('hidden');
   $('header-handle').textContent = '@' + handle;
   state.user = { handle };
-  connectSocket();
   loadProfile();
   loadFeed();
   loadTags();
@@ -572,36 +569,11 @@ async function claimChallenge(key){
   try { await api('POST', `/api/challenges/${key}/claim`); toast('Claimed!'); loadChallenges(); loadProfile(); } catch(e){ toast(e.message, true); }
 }
 
-/* ======= SocketIO & Live Chat ======= */
+/* ======= Chat (REST + Polling) ======= */
 
-let socket = null;
 let currentConvId = null;
+let msgPollTimer = null;
 
-function connectSocket(){
-  if(socket && socket.connected) return;
-  socket = io({ transports: ['websocket', 'polling'] });
-  socket.on('connect', () => console.log('SocketIO connected'));
-  socket.on('new_message', data => {
-    // If we're viewing this conversation, add the message
-    if(currentConvId && data.conversation_id === currentConvId){
-      addMessage(data);
-    }
-    // Reload conversation list to update previews
-    if($('tab-chat').classList.contains('active')) loadConversations();
-  });
-  socket.on('typing', data => {
-    if(currentConvId && data.conversation_id === currentConvId){
-      $('typing-indicator').textContent = data.is_typing ? `${data.sender_handle || 'Someone'} is typing…` : '';
-    }
-  });
-  socket.on('disconnect', () => console.log('SocketIO disconnected'));
-}
-
-function disconnectSocket(){
-  if(socket) { socket.disconnect(); socket = null; }
-}
-
-/* Chat */
 function searchUsers(q){
   const el = $('user-results');
   if(q.length < 2){ el.classList.add('hidden'); return; }
@@ -647,24 +619,22 @@ async function loadConversations(){
 
 async function openConversation(convId){
   currentConvId = convId;
-  // Get other handle from the conversation list data
   const convs = await api('GET', '/api/conversations');
   const conv = convs.conversations.find(c => c.id === convId);
   $('msg-header-handle').textContent = '@' + (conv ? escHtml(conv.other_handle) : 'Chat');
   $('msg-view').classList.remove('hidden');
-  $('typing-indicator').textContent = '';
   $('msg-input').value = '';
   $('msg-input').focus();
-  // Join the SocketIO room
-  if(socket && socket.connected) socket.emit('join_conversation', { conversation_id: convId });
   await loadMessages();
+  // Start polling for new messages
+  if(msgPollTimer) clearInterval(msgPollTimer);
+  msgPollTimer = setInterval(loadMessages, 2000);
 }
 
 function closeMsgView(){
   currentConvId = null;
+  if(msgPollTimer) { clearInterval(msgPollTimer); msgPollTimer = null; }
   $('msg-view').classList.add('hidden');
-  // Typing cleanup
-  if(socket && socket.connected) socket.emit('typing', { conversation_id: currentConvId, is_typing: false });
 }
 
 async function loadMessages(){
@@ -673,12 +643,12 @@ async function loadMessages(){
     const d = await api('GET', `/api/conversations/${currentConvId}/messages`);
     const el = $('msgs');
     if(!d.messages || !d.messages.length){
-      el.innerHTML = '<div class="empty-state" style="padding:20px">No messages yet. Say hello!</div>';
+      if(!el.querySelector('.empty-state')) el.innerHTML = '<div class="empty-state" style="padding:20px">No messages yet. Say hello!</div>';
       return;
     }
     el.innerHTML = d.messages.map(m => renderMessage(m)).join('');
     el.scrollTop = el.scrollHeight;
-  } catch(e){ $('msgs').innerHTML = '<div class="empty-state">Could not load messages.</div>'; }
+  } catch(e){ /* ignore */ }
 }
 
 function renderMessage(m){
@@ -690,48 +660,19 @@ function renderMessage(m){
   </div>`;
 }
 
-function addMessage(m){
-  const el = $('msgs');
-  const isMine = m.sender_handle === (state.user && state.user.handle);
-  el.insertAdjacentHTML('beforeend', renderMessage(m));
-  el.scrollTop = el.scrollHeight;
-}
-
 async function sendMessage(){
   if(!currentConvId) return;
   const input = $('msg-input');
   const text = input.value.trim();
   if(!text) return;
   input.value = '';
-  // Send typing stopped
-  if(socket && socket.connected) socket.emit('typing', { conversation_id: currentConvId, is_typing: false });
-  // Send via SocketIO
-  if(socket && socket.connected){
-    socket.emit('send_message', { conversation_id: currentConvId, text });
-  } else {
-    // Fallback to REST
-    try {
-      const d = await api('POST', `/api/conversations/${currentConvId}/messages`, { text });
-      loadMessages();
-    } catch(e){ toast(e.message, true); }
-  }
+  try {
+    await api('POST', `/api/conversations/${currentConvId}/messages`, { text });
+    await loadMessages();
+    // Refresh conversation list for updated previews
+    if($('tab-chat').classList.contains('active')) loadConversations();
+  } catch(e){ toast(e.message, true); }
 }
-
-// Typing indicator
-let typingTimer = null;
-document.addEventListener('DOMContentLoaded', () => {
-  const input = $('msg-input');
-  if(input){
-    input.addEventListener('input', () => {
-      if(!currentConvId || !socket || !socket.connected) return;
-      socket.emit('typing', { conversation_id: currentConvId, is_typing: true });
-      clearTimeout(typingTimer);
-      typingTimer = setTimeout(() => {
-        socket.emit('typing', { conversation_id: currentConvId, is_typing: false });
-      }, 1500);
-    });
-  }
-});
 
 function timeAgo(iso){
   const sec = (Date.now() - new Date(iso).getTime()) / 1000;
