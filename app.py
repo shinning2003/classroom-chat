@@ -995,20 +995,29 @@ def create_app(config=None):
     # Ensure schema exists on startup.
     # (create_app is called directly, not run.py), so we must init the DB here
     # — otherwise tables are never created and every API call 500s.
-    # Tolerate a temporarily-unavailable DB at import time: log and continue
-    # rather than crashing the whole app; per-request calls will surface errors.
-    try:
-        with app.app_context():
-            init_db()
-            if app.config.get("DATABASE_URL"):
-                app.logger.info("Campus Whispers: using Postgres (DATABASE_URL set)")
-            else:
-                app.logger.warning(
-                    "Campus Whispers: DATABASE_URL not set — using SQLite. "
-                    "On Render this is EPHEMERAL and data will be lost on restart."
-                )
-    except Exception as exc:  # pragma: no cover - defensive startup guard
-        app.logger.error("Campus Whispers: DB init failed at startup: %s", exc)
+    # Run it in a BACKGROUND THREAD so gunicorn binds the port instantly:
+    # DNS resolution inside psycopg.connect() is not reliably covered by
+    # connect_timeout, and a slow resolver would block create_app() for many
+    # minutes, blowing past Render's port-scan timeout and failing the deploy.
+    # Tolerate a temporarily-unavailable DB: log and continue; per-request
+    # calls will surface errors.
+    import threading as _threading
+
+    def _startup_db_init():
+        try:
+            with app.app_context():
+                init_db()
+                if app.config.get("DATABASE_URL"):
+                    app.logger.info("Campus Whispers: using Postgres (DATABASE_URL set)")
+                else:
+                    app.logger.warning(
+                        "Campus Whispers: DATABASE_URL not set — using SQLite. "
+                        "On Render this is EPHEMERAL and data will be lost on restart."
+                    )
+        except Exception as e:
+            app.logger.warning(f"Startup DB init failed (will retry lazily): {e}")
+
+    _threading.Thread(target=_startup_db_init, daemon=True).start()
 
     app.logger.info("Campus Whispers: app started successfully")
     return app
