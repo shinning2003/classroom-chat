@@ -1018,7 +1018,7 @@ def create_app(config=None):
                         )
                     return
             except Exception as e:
-                print(f"[dbg] startup DB init failed: {type(e).__name__}: {str(e)[:200]} — retrying in 10s", flush=True)
+                app.logger.warning(f"Startup DB init failed (retrying in 10s): {e}")
                 time.sleep(10)
 
     threading.Thread(target=_startup_db_init, daemon=True).start()
@@ -1289,10 +1289,6 @@ def _resolve_pg_ip_bounded(url, timeout=3.0):
     t = threading.Thread(target=_do, daemon=True)
     t.start()
     t.join(timeout)
-    if box:
-        print(f"[dbg] resolved {host} -> {box[0]} (in {timeout}s window)", flush=True)
-    else:
-        print(f"[dbg] resolve {host} -> TIMEOUT/None (no answer in {timeout}s)", flush=True)
     return box[0] if box else None
 
 
@@ -1307,21 +1303,16 @@ def _pg_connect_bounded(url, timeout=12.0):
     import psycopg
     from psycopg.rows import dict_row
     box = {}
-    t0 = time.time()
 
     def _do():
         try:
             box["conn"] = psycopg.connect(url, row_factory=dict_row)
-            box["t"] = time.time() - t0
         except Exception as e:
             box["err"] = e
-            box["t"] = time.time() - t0
 
     t = threading.Thread(target=_do, daemon=True)
     t.start()
     t.join(timeout)
-    print(f"[dbg] connect to {url.split('@')[-1].split('?')[0]} -> "
-          f"{'OK %.1fs' % box['t'] if 'conn' in box else ('ERR %.1fs %s' % (box.get('t', 0), type(box.get('err', '')).__name__) if 'err' in box else f'TIMEOUT after {timeout}s')}", flush=True)
     if "conn" in box:
         return box["conn"]
     if "err" in box:
@@ -1899,7 +1890,7 @@ def _challenge_progress(conn, user_id, kind):
 def _user_rank(conn, user_id):
     """1-based rank of a user by points (higher points = better rank)."""
     row = exec(conn,
-        "SELECT COUNT(*) + 1 FROM users WHERE banned=0 AND points > "
+        "SELECT COUNT(*) + 1 AS user_rank FROM users WHERE banned=0 AND points > "
         "(SELECT points FROM users WHERE id=?)",
         (user_id,)).fetchone()
-    return row[0] if row else None
+    return row["user_rank"] if row else None
