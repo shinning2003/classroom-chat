@@ -1304,8 +1304,6 @@ def serve_page(name):
         return f.read()
 
 _db_global = None
-# Cached resolved URL so we don't re-compute on every request
-_resolved_pg_url = None
 
 
 def get_db(db_path=None):
@@ -1325,25 +1323,14 @@ def get_db(db_path=None):
             from psycopg.rows import dict_row
 
             if db_path is None:
-                global _db_global, _resolved_pg_url
+                global _db_global
                 if _db_global is None:
-                    # Build the final URL once for this worker
-                    if _resolved_pg_url is None:
-                        # Render free tier can't route IPv6 to external providers.
-                        # Force IPv4 if available; fall back to hostname if not.
-                        import socket
-                        from urllib.parse import urlparse
-                        parsed = urlparse(url)
-                        try:
-                            addrs = socket.getaddrinfo(parsed.hostname, None, socket.AF_INET)
-                            ip = addrs[0][4][0]
-                            _resolved_pg_url = url.replace(parsed.hostname, ip)
-                        except socket.gaierror:
-                            # No IPv4 address — use hostname as-is (e.g. Render internal Postgres)
-                            _resolved_pg_url = url
-                    _conn_timeout = f"{'&' if '?' in _resolved_pg_url else '?'}connect_timeout=5"
+                    # Connect directly — Render Postgres internal hostname
+                    # resolves fine via psycopg's native DNS; no IPv4 pinning
+                    # (that was only needed for Supabase's IPv6-only host).
+                    _conn_timeout = f"{'&' if '?' in url else '?'}connect_timeout=5"
                     _db_global = psycopg.connect(
-                        f"{_resolved_pg_url}{_conn_timeout}",
+                        f"{url}{_conn_timeout}",
                         row_factory=dict_row,
                     )
                     # Patch close() to no-op — teardown just pops g.db
@@ -1358,9 +1345,9 @@ def get_db(db_path=None):
                             _db_global._orig_close()
                         except Exception:
                             pass
-                        _conn_timeout = f"{'&' if '?' in _resolved_pg_url else '?'}connect_timeout=5"
+                        _conn_timeout = f"{'&' if '?' in url else '?'}connect_timeout=5"
                         _db_global = psycopg.connect(
-                            f"{_resolved_pg_url}{_conn_timeout}",
+                            f"{url}{_conn_timeout}",
                             row_factory=dict_row,
                         )
                         _db_global._orig_close = _db_global.close
