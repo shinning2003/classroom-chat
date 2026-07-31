@@ -39,8 +39,9 @@ a{color:var(--accent);cursor:pointer}
 
 <div id="panel" class="hidden">
   <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
-    <button class="btn-ghost" onclick="loadUsers()">👥 Users</button>
-    <button class="btn-ghost" onclick="loadRumors()">📝 Rumors</button>
+    <button class="btn-ghost tab-btn active" data-tab="users" onclick="switchTab('users')">👥 Users</button>
+    <button class="btn-ghost tab-btn" data-tab="chat" onclick="switchTab('chat')">💬 Chat</button>
+    <span style="font-size:11px;color:var(--muted);margin-left:auto">live · auto-refresh</span>
     <button class="btn-ghost" onclick="logout()">🚪 Logout</button>
   </div>
 
@@ -80,10 +81,31 @@ async function adminLogin(){
 function showPanel(){
   document.getElementById('login-area').classList.add('hidden');
   document.getElementById('panel').classList.remove('hidden');
-  loadUsers();
+  switchTab('users');
+  startAdminTick();
+}
+
+/* Live auto-refresh: every 2.5s re-fetch whichever tab is open, so points,
+   bans and chat messages stay in sync with the user app in real time. */
+let adminState = { tab: 'users' };
+let adminTick = null;
+
+function switchTab(tab){
+  adminState.tab = tab;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  if(tab === 'users') loadUsers(); else loadChat();
+}
+
+function startAdminTick(){
+  if(adminTick) return;
+  adminTick = setInterval(() => {
+    if(document.getElementById('panel').classList.contains('hidden')) return;
+    if(adminState.tab === 'users') loadUsers(); else loadChat();
+  }, 2500);
 }
 
 async function logout(){
+  if(adminTick){ clearInterval(adminTick); adminTick = null; }
   try{await api('POST','/api/admin/logout')}catch(e){}
   document.getElementById('panel').classList.add('hidden');
   document.getElementById('login-area').classList.remove('hidden');
@@ -113,25 +135,29 @@ async function loadUsers(){
   }catch(e){el.innerHTML='<div class="card">Error: '+e.message+'</div>'}
 }
 
-async function loadRumors(){
+/* Live group-chat moderation feed — newest first, with the sender's real
+   identity so the admin can moderate, and a delete button per message. */
+async function loadChat(){
   const el=document.getElementById('admin-content');
   try{
-    const d=await api('GET','/api/admin/rumors');
-    if(!d.rumors||!d.rumors.length){el.innerHTML='<div class="card">No rumors.</div>';return}
-    el.innerHTML=`<table><thead><tr><th>ID</th><th>Text</th><th>Handle</th><th>Real Name</th><th>Date</th><th>Actions</th></tr></thead><tbody>
-      ${d.rumors.map(r=>`<tr>
-        <td>${r.id}</td>
-        <td>${esc(r.text.substring(0,60))}${r.text.length>60?'…':''}</td>
-        <td>@${esc(r.handle)}</td>
-        <td>${esc(r.real_name)}</td>
-        <td>${new Date(r.created_at).toLocaleDateString()}</td>
-        <td class="actions">
-          <button class="btn-danger" onclick="deleteRumor(${r.id})">del</button>
-          <button class="btn-ghost" onclick="featureRumor(${r.id})">✨ feature</button>
-        </td>
-      </tr>`).join('')}
-    </tbody></table>`;
+    const d=await api('GET','/api/admin/chat');
+    if(!d.messages||!d.messages.length){el.innerHTML='<div class="card">No chat messages yet.</div>';return}
+    el.innerHTML=d.messages.map(m=>`
+      <div class="card" style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+        <div style="min-width:0">
+          <div style="font-size:12px;color:var(--muted)">
+            @${esc(m.handle)}${m.real_name?' · '+esc(m.real_name):''}${m.banned?' <span style="color:var(--danger)">(banned)</span>':''} · ${new Date(m.created_at).toLocaleString()}
+          </div>
+          <div style="margin-top:4px;word-break:break-word">${esc(m.text)}</div>
+        </div>
+        <button class="btn-danger" onclick="deleteChatMsg(${m.id})">🗑</button>
+      </div>`).join('');
   }catch(e){el.innerHTML='<div class="card">Error: '+e.message+'</div>'}
+}
+
+async function deleteChatMsg(mid){
+  if(!confirm('Delete this chat message?'))return;
+  try{await api('DELETE',`/api/admin/chat/${mid}`);toast('Deleted!');loadChat()}catch(e){toast(e.message)}
 }
 
 async function grantPoints(uid){
@@ -145,15 +171,8 @@ async function resetPw(uid){
   try{await api('POST',`/api/admin/users/${uid}/reset-password`,{new_password:pw});toast('Password reset!')}catch(e){toast(e.message)}
 }
 async function banUser(uid){
-  if(!confirm('Ban this user? Their rumors will be deleted.'))return;
+  if(!confirm('Ban this user? They will be blocked from posting immediately.'))return;
   try{await api('DELETE',`/api/admin/users/${uid}`);toast('Banned!');loadUsers()}catch(e){toast(e.message)}
-}
-async function deleteRumor(rid){
-  if(!confirm('Delete this rumor?'))return;
-  try{await api('DELETE',`/api/admin/rumors/${rid}`);toast('Deleted!');loadRumors()}catch(e){toast(e.message)}
-}
-async function featureRumor(rid){
-  try{await api('POST',`/api/admin/rumors/${rid}/feature`);toast('Featured!');loadRumors()}catch(e){toast(e.message)}
 }
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
 </script>

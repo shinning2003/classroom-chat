@@ -826,6 +826,43 @@ def create_app(config=None):
         conn.close()
         return jsonify({"ok": True, "banned": uid})
 
+    @app.get("/api/admin/chat")
+    def admin_chat():
+        """Live group-chat moderation feed (newest first)."""
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        conn = get_db()
+        rows = exec(conn,
+            "SELECT rm.id, rm.user_id, rm.text, rm.created_at, u.handle, "
+            "u.real_name, u.banned "
+            "FROM room_messages rm JOIN users u ON u.id = rm.user_id "
+            "ORDER BY rm.id DESC LIMIT 200",
+            ()).fetchall()
+        msgs = [{
+            "id": r["id"],
+            "sender_id": r["user_id"],
+            "handle": r["handle"],
+            "real_name": r["real_name"],
+            "banned": bool(r["banned"]),
+            "text": r["text"],
+            "created_at": r["created_at"],
+        } for r in rows]
+        conn.close()
+        return jsonify({"messages": msgs})
+
+    @app.delete("/api/admin/chat/<int:mid>")
+    def admin_delete_chat_message(mid):
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        conn = get_db()
+        cur = exec(conn, "DELETE FROM room_messages WHERE id=?", (mid,))
+        conn.commit()
+        deleted = cur.rowcount if hasattr(cur, "rowcount") else 1
+        conn.close()
+        if not deleted:
+            return jsonify({"error": "Message not found."}), 404
+        return jsonify({"ok": True, "deleted": mid})
+
     # === Admin: (questions feature removed) ===
 
     @app.get("/")

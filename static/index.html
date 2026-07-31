@@ -236,6 +236,15 @@ async function api(method, path, body){
   return data;
 }
 
+// Real-time ban enforcement: when the server says the account was removed,
+// drop the session and bounce to the login screen immediately.
+function authKick(e){
+  if(e && e.message && e.message.indexOf('Account removed') !== -1){
+    toast('Your account was removed by the admin.', true);
+    logout();
+  }
+}
+
 /* ======= PWA + Push notifications ======= */
 
 // Register the service worker (app installability + push delivery)
@@ -347,6 +356,7 @@ function logout(){
   state.user = null;
   state.pushOn = false;
   if(roomPollTimer){ clearInterval(roomPollTimer); roomPollTimer = null; }
+  if(profileTick){ clearInterval(profileTick); profileTick = null; }
   $('app').classList.add('hidden');
   $('auth-screen').classList.remove('hidden');
   $('login-id').value = '';
@@ -388,6 +398,10 @@ async function enterApp(handle){
   loadLeaderboard();
   startRoomPolling();
   syncPushState();
+  // Live points/rank: refresh the profile periodically so admin grants,
+  // purchases and point awards appear without a manual reload.
+  if(profileTick) clearInterval(profileTick);
+  profileTick = setInterval(loadProfile, 15000);
 }
 
 /* Navigation */
@@ -406,6 +420,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
 /* ======= Group Room (Feed = group chat) ======= */
 
 let roomPollTimer = null;
+let profileTick = null;
 
 function startRoomPolling(){
   if(roomPollTimer) return;
@@ -423,7 +438,7 @@ async function loadRoom(){
     }
     el.innerHTML = d.messages.map(renderMessage).join('');
     el.scrollTop = el.scrollHeight;
-  } catch(e){ /* ignore */ }
+  } catch(e){ authKick(e); }
 }
 
 async function sendRoomMsg(){
@@ -436,7 +451,7 @@ async function sendRoomMsg(){
     if(d.points !== undefined) $('header-pts').textContent = d.points + ' pts';
     loadProfile();
     await loadRoom();
-  } catch(e){ toast(e.message, true); }
+  } catch(e){ toast(e.message, true); authKick(e); }
 }
 
 function escHtml(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
@@ -459,7 +474,7 @@ async function loadProfile(){
     }
     html += '</div>';
     $('profile-area').innerHTML = html;
-  } catch(e){ /* ignore */ }
+  } catch(e){ authKick(e); }
 }
 
 /* Shop */
