@@ -6,7 +6,10 @@ identity behind a handle, and can ban/delete anyone who misbehaves.
 """
 import os
 import re
+import socket
 import sqlite3
+import threading
+import time
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, jsonify, request, session, current_app, g
@@ -999,25 +1002,26 @@ def create_app(config=None):
     # DNS resolution inside psycopg.connect() is not reliably covered by
     # connect_timeout, and a slow resolver would block create_app() for many
     # minutes, blowing past Render's port-scan timeout and failing the deploy.
-    # Tolerate a temporarily-unavailable DB: log and continue; per-request
-    # calls will surface errors.
-    import threading as _threading
-
+    # Tolerate a temporarily-unavailable DB: retry in a loop, log and continue;
+    # per-request calls will surface errors until the DB is reachable.
     def _startup_db_init():
-        try:
-            with app.app_context():
-                init_db()
-                if app.config.get("DATABASE_URL"):
-                    app.logger.info("Campus Whispers: using Postgres (DATABASE_URL set)")
-                else:
-                    app.logger.warning(
-                        "Campus Whispers: DATABASE_URL not set — using SQLite. "
-                        "On Render this is EPHEMERAL and data will be lost on restart."
-                    )
-        except Exception as e:
-            app.logger.warning(f"Startup DB init failed (will retry lazily): {e}")
+        while True:
+            try:
+                with app.app_context():
+                    init_db()
+                    if app.config.get("DATABASE_URL"):
+                        app.logger.info("Campus Whispers: using Postgres (DATABASE_URL set)")
+                    else:
+                        app.logger.warning(
+                            "Campus Whispers: DATABASE_URL not set — using SQLite. "
+                            "On Render this is EPHEMERAL and data will be lost on restart."
+                        )
+                    return
+            except Exception as e:
+                app.logger.warning(f"Startup DB init failed (retrying in 10s): {e}")
+                time.sleep(10)
 
-    _threading.Thread(target=_startup_db_init, daemon=True).start()
+    threading.Thread(target=_startup_db_init, daemon=True).start()
 
     app.logger.info("Campus Whispers: app started successfully")
     return app
@@ -1248,6 +1252,90 @@ def serve_page(name):
         return f.read()
 
 _db_global = None
+# Cached Postgres IP (avoids re-resolving; the internal DNS on some Render
+# instances hangs for minutes, so we pin the IP once we have it).
+_pg_ip_cache = None
+_PG_IP_FILE = os.path.join(os.path.sep, "tmp", "pg_ip.txt")
+
+
+def _resolve_pg_ip_bounded(url, timeout=3.0):
+    """Resolve a Postgres hostname to an IPv4 with a hard timeout.
+
+    socket.getaddrinfo() on some Render instances hangs for many minutes
+    (flaky internal DNS). Running it in a daemon thread with a bounded join
+    means we never block startup or requests on DNS.
+    Returns the IP string, or None on timeout/failure.
+    """
+    try:
+        from urllib.parse import urlsplit
+    except Exception:
+        return None
+    try:
+        host = urlsplit(url).hostname
+    except Exception:
+        return None
+    if not host:
+        return None
+    box = []
+
+    def _do():
+        try:
+            infos = socket.getaddrinfo(host, None, socket.AF_INET)
+            if infos:
+                box.append(infos[0][4][0])
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_do, daemon=True)
+    t.start()
+    t.join(timeout)
+    return box[0] if box else None
+
+
+def _pg_connect_bounded(url, timeout=12.0):
+    """psycopg.connect() with a hard overall timeout.
+
+    connect_timeout=5 in the URL does not reliably cover DNS resolution
+    (libpq applies it after name resolution), and a hung resolver would
+    block a request forever. Connecting in a daemon thread with a bounded
+    join guarantees we return (or raise) within `timeout` seconds.
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+    box = {}
+
+    def _do():
+        try:
+            box["conn"] = psycopg.connect(url, row_factory=dict_row)
+        except Exception as e:
+            box["err"] = e
+
+    t = threading.Thread(target=_do, daemon=True)
+    t.start()
+    t.join(timeout)
+    if "conn" in box:
+        return box["conn"]
+    if "err" in box:
+        raise box["err"]
+    raise TimeoutError(f"Postgres connect timed out after {timeout}s")
+
+
+def _pg_url_with_ip(url, ip):
+    """Replace the hostname in a Postgres URL with an IP literal, forcing
+    sslmode=require (no hostname verification — we're connecting by IP)."""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(url)
+        host = parts.hostname
+        if not host:
+            return url
+        netloc = parts.netloc.replace(host, ip)
+        query = parts.query
+        if "sslmode=" not in query:
+            query = (query + "&" if query else "") + "sslmode=require"
+        return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+    except Exception:
+        return url
 
 
 def get_db(db_path=None):
@@ -1264,19 +1352,30 @@ def get_db(db_path=None):
     if url:
         try:
             import psycopg
-            from psycopg.rows import dict_row
 
             if db_path is None:
-                global _db_global
+                global _db_global, _pg_ip_cache
                 if _db_global is None:
-                    # Connect directly — Render Postgres internal hostname
-                    # resolves fine via psycopg's native DNS; no IPv4 pinning
-                    # (that was only needed for Supabase's IPv6-only host).
-                    _conn_timeout = f"{'&' if '?' in url else '?'}connect_timeout=5"
-                    _db_global = psycopg.connect(
-                        f"{url}{_conn_timeout}",
-                        row_factory=dict_row,
-                    )
+                    # Pin the host to an IP so a flaky DNS resolver can't
+                    # hang the connect (the bounded resolve returns None
+                    # quickly on timeout; we then fall back to the hostname).
+                    ip = _pg_ip_cache
+                    if not ip and os.path.exists(_PG_IP_FILE):
+                        try:
+                            ip = open(_PG_IP_FILE).read().strip() or None
+                        except Exception:
+                            ip = None
+                    if not ip:
+                        ip = _resolve_pg_ip_bounded(url)
+                        if ip:
+                            _pg_ip_cache = ip
+                            try:
+                                with open(_PG_IP_FILE, "w") as f:
+                                    f.write(ip)
+                            except Exception:
+                                pass
+                    conn_url = _pg_url_with_ip(url, ip) if ip else url
+                    _db_global = _pg_connect_bounded(conn_url)
                     # Patch close() to no-op — teardown just pops g.db
                     _db_global._orig_close = _db_global.close
                     _db_global.close = lambda: None
@@ -1289,11 +1388,14 @@ def get_db(db_path=None):
                             _db_global._orig_close()
                         except Exception:
                             pass
-                        _conn_timeout = f"{'&' if '?' in url else '?'}connect_timeout=5"
-                        _db_global = psycopg.connect(
-                            f"{url}{_conn_timeout}",
-                            row_factory=dict_row,
-                        )
+                        ip = _pg_ip_cache
+                        if not ip and os.path.exists(_PG_IP_FILE):
+                            try:
+                                ip = open(_PG_IP_FILE).read().strip() or None
+                            except Exception:
+                                ip = None
+                        conn_url = _pg_url_with_ip(url, ip) if ip else url
+                        _db_global = _pg_connect_bounded(conn_url)
                         _db_global._orig_close = _db_global.close
                         _db_global.close = lambda: None
                 g.db = _db_global
