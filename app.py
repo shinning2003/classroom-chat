@@ -1450,6 +1450,7 @@ def get_db(db_path=None):
                 return _db_global
             else:
                 # One-off connection (init_db with custom path)
+                from psycopg.rows import dict_row
                 return psycopg.connect(
                     f"{url}{'&' if '?' in url else '?'}connect_timeout=5",
                     row_factory=dict_row)

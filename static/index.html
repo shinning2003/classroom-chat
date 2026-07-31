@@ -102,32 +102,13 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
 .badge-opt{padding:6px 12px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:12px;background:var(--surface2)}
 .badge-opt.selected{border-color:var(--accent);background:var(--accent);color:#0a0f1a}
 
-/* Chat UI */
-#chat-area{display:flex;flex-direction:column;height:calc(100vh - 120px)}
-.conv-search{display:flex;gap:6px;margin-bottom:8px}
-.conv-search input{flex:1}
-.conv-list{flex:1;overflow-y:auto}
-.conv-item{display:flex;align-items:center;padding:10px 12px;border-radius:var(--radius);border:1px solid var(--border);margin-bottom:6px;cursor:pointer;background:var(--surface)}
-.conv-item:hover{background:var(--surface2)}
-.conv-item .handle{font-weight:600;font-size:14px;color:var(--accent)}
-.conv-item .preview{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
-.conv-item .time{font-size:10px;color:var(--muted);margin-left:auto;white-space:nowrap}
-/* Message view */
-#msg-view{position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg);z-index:150;display:flex;flex-direction:column}
-#msg-header{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 16px;display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600}
-#msg-header .back{cursor:pointer;color:var(--accent);font-size:20px;line-height:1}
-#msgs{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+/* Message bubbles (shared: room feed) */
 .msg{max-width:80%;padding:8px 12px;border-radius:12px;font-size:14px;line-height:1.4;word-break:break-word}
 .msg.mine{align-self:flex-end;background:var(--accent);color:#0a0f1a;border-bottom-right-radius:4px}
 .msg.theirs{align-self:flex-start;background:var(--surface2);border:1px solid var(--border);border-bottom-left-radius:4px}
 .msg .sender{font-size:11px;color:var(--muted);margin-bottom:2px}
 .msg.mine .sender{color:rgba(0,0,0,.5)}
 .msg .time{font-size:10px;color:var(--muted);text-align:right;margin-top:2px}
-#msg-input-area{display:flex;gap:8px;padding:8px 12px;background:var(--surface);border-top:1px solid var(--border)}
-#msg-input-area input{flex:1}
-#typing-indicator{font-size:11px;color:var(--muted);padding:2px 12px 4px;min-height:18px}
-.user-search-result{padding:8px 12px;cursor:pointer;border-radius:var(--radius);border:1px solid var(--border);margin-bottom:4px;background:var(--surface)}
-.user-search-result:hover{background:var(--surface2)}
 </style>
 </head>
 <body>
@@ -196,17 +177,6 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
       <h3 style="margin:16px 0 10px;font-size:16px">🏪 Shop</h3>
       <div id="shop"></div>
     </div>
-    <!-- Chat tab -->
-    <div class="tab-content" id="tab-chat">
-      <h3 style="margin-bottom:10px;font-size:16px">💬 Chat</h3>
-      <div id="chat-area">
-        <div class="conv-search">
-          <input id="chat-search" placeholder="Search users…" oninput="searchUsers(this.value)">
-        </div>
-        <div id="user-results" class="hidden"></div>
-        <div class="conv-list" id="conv-list"></div>
-      </div>
-    </div>
   </div>
   <div id="bottom-nav">
     <div class="nav-item active" data-tab="feed">
@@ -221,24 +191,6 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
       Me
     </div>
-    <div class="nav-item" data-tab="chat">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-      Chat
-    </div>
-  </div>
-</div>
-
-<!-- Message view overlay -->
-<div id="msg-view" class="hidden">
-  <div id="msg-header">
-    <span class="back" onclick="closeMsgView()">←</span>
-    <span id="msg-header-handle"></span>
-  </div>
-  <div id="typing-indicator"></div>
-  <div id="msgs"></div>
-  <div id="msg-input-area">
-    <input id="msg-input" placeholder="Type a message…" onkeydown="if(event.key==='Enter')sendMessage()">
-    <button class="btn btn-sm btn-primary" onclick="sendMessage()">Send</button>
   </div>
 </div>
 
@@ -329,7 +281,6 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if(el.dataset.tab === 'feed') loadRoom();
     if(el.dataset.tab === 'leaderboard') { loadLeaderboard(); loadChallenges(); }
     if(el.dataset.tab === 'profile') { loadProfile(); loadShop(); }
-    if(el.dataset.tab === 'chat') { loadConversations(); }
   });
 });
 
@@ -464,87 +415,7 @@ async function claimChallenge(key){
   try { await api('POST', `/api/challenges/${key}/claim`); toast('Claimed!'); loadChallenges(); loadProfile(); } catch(e){ toast(e.message, true); }
 }
 
-/* ======= Chat (REST + Polling) ======= */
-
-let currentConvId = null;
-let msgPollTimer = null;
-
-function searchUsers(q){
-  const el = $('user-results');
-  if(q.length < 2){ el.classList.add('hidden'); return; }
-  api('GET', '/api/users/search?q=' + encodeURIComponent(q))
-    .then(d => {
-      if(!d.users || !d.users.length){ el.classList.add('hidden'); return; }
-      el.innerHTML = d.users.map(u =>
-        `<div class="user-search-result" onclick="startConversation(${u.id})">@${escHtml(u.handle)}</div>`
-      ).join('');
-      el.classList.remove('hidden');
-    }).catch(() => {});
-}
-
-async function startConversation(userId){
-  try {
-    const d = await api('POST', '/api/conversations', { user_id: userId });
-    $('chat-search').value = '';
-    $('user-results').classList.add('hidden');
-    openConversation(d.conversation_id);
-    loadConversations();
-  } catch(e){ toast(e.message, true); }
-}
-
-async function loadConversations(){
-  try {
-    const d = await api('GET', '/api/conversations');
-    const el = $('conv-list');
-    if(!d.conversations || !d.conversations.length){
-      el.innerHTML = '<div class="empty-state">No conversations yet. Search for a user to start chatting!</div>';
-      return;
-    }
-    el.innerHTML = d.conversations.map(c =>
-      `<div class="conv-item" onclick="openConversation(${c.id})">
-        <div style="flex:1">
-          <div class="handle">@${escHtml(c.other_handle)}</div>
-          ${c.last_message ? `<div class="preview">${escHtml(c.last_message)}</div>` : '<div class="preview" style="color:var(--accent)">Start chatting…</div>'}
-        </div>
-        ${c.last_at ? `<div class="time">${timeAgo(c.last_at)}</div>` : ''}
-      </div>`
-    ).join('');
-  } catch(e){ /* ignore */ }
-}
-
-async function openConversation(convId){
-  currentConvId = convId;
-  const convs = await api('GET', '/api/conversations');
-  const conv = convs.conversations.find(c => c.id === convId);
-  $('msg-header-handle').textContent = '@' + (conv ? escHtml(conv.other_handle) : 'Chat');
-  $('msg-view').classList.remove('hidden');
-  $('msg-input').value = '';
-  $('msg-input').focus();
-  await loadMessages();
-  // Start polling for new messages
-  if(msgPollTimer) clearInterval(msgPollTimer);
-  msgPollTimer = setInterval(loadMessages, 2000);
-}
-
-function closeMsgView(){
-  currentConvId = null;
-  if(msgPollTimer) { clearInterval(msgPollTimer); msgPollTimer = null; }
-  $('msg-view').classList.add('hidden');
-}
-
-async function loadMessages(){
-  if(!currentConvId) return;
-  try {
-    const d = await api('GET', `/api/conversations/${currentConvId}/messages`);
-    const el = $('msgs');
-    if(!d.messages || !d.messages.length){
-      if(!el.querySelector('.empty-state')) el.innerHTML = '<div class="empty-state" style="padding:20px">No messages yet. Say hello!</div>';
-      return;
-    }
-    el.innerHTML = d.messages.map(m => renderMessage(m)).join('');
-    el.scrollTop = el.scrollHeight;
-  } catch(e){ /* ignore */ }
-}
+/* ======= Message rendering (shared by room feed) ======= */
 
 function renderMessage(m){
   const isMine = m.sender_handle === (state.user && state.user.handle);
@@ -553,20 +424,6 @@ function renderMessage(m){
     <div>${escHtml(m.text)}</div>
     <div class="time">${timeAgo(m.created_at)}</div>
   </div>`;
-}
-
-async function sendMessage(){
-  if(!currentConvId) return;
-  const input = $('msg-input');
-  const text = input.value.trim();
-  if(!text) return;
-  input.value = '';
-  try {
-    await api('POST', `/api/conversations/${currentConvId}/messages`, { text });
-    await loadMessages();
-    // Refresh conversation list for updated previews
-    if($('tab-chat').classList.contains('active')) loadConversations();
-  } catch(e){ toast(e.message, true); }
 }
 
 function timeAgo(iso){
