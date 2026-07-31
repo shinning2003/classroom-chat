@@ -32,7 +32,7 @@ a{color:var(--accent);cursor:pointer}
 
 <div id="login-area">
   <div class="card" style="max-width:320px">
-    <input type="password" id="admin-pass" placeholder="Admin password" style="width:100%;margin-bottom:8px">
+    <input type="password" id="admin-pass" placeholder="Admin password" style="width:100%;margin-bottom:8px" onkeydown="if(event.key==='Enter')adminLogin()">
     <button class="btn-primary" onclick="adminLogin()">Login</button>
   </div>
 </div>
@@ -59,10 +59,31 @@ async function api(method, path, body){
 function toast(m){const e=document.createElement('div');e.className='toast';e.textContent=m;document.body.appendChild(e);setTimeout(()=>e.remove(),2500)}
 
 async function adminLogin(){
-  try{await api('POST','/api/admin/login',{password:document.getElementById('admin-pass').value});document.getElementById('login-area').classList.add('hidden');document.getElementById('panel').classList.remove('hidden');loadUsers()}catch(e){toast(e.message)}
+  try{await api('POST','/api/admin/login',{password:document.getElementById('admin-pass').value});showPanel()}catch(e){toast(e.message)}
 }
 
-function logout(){document.getElementById('panel').classList.add('hidden');document.getElementById('login-area').classList.remove('hidden');document.getElementById('admin-pass').value=''}
+// The admin session cookie is persistent (30 days), so restore the panel
+// on load instead of forcing a fresh login — and keep logout real by
+// clearing the server session too.
+(async function restoreAdmin(){
+  try{
+    await api('GET','/api/admin/me');
+    showPanel();
+  }catch(e){/* no admin session — stay on the login card */}
+})();
+
+function showPanel(){
+  document.getElementById('login-area').classList.add('hidden');
+  document.getElementById('panel').classList.remove('hidden');
+  loadUsers();
+}
+
+async function logout(){
+  try{await api('POST','/api/admin/logout')}catch(e){}
+  document.getElementById('panel').classList.add('hidden');
+  document.getElementById('login-area').classList.remove('hidden');
+  document.getElementById('admin-pass').value='';
+}
 
 async function loadUsers(){
   const el=document.getElementById('admin-content');

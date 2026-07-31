@@ -41,6 +41,20 @@ def create_app(config=None):
     def persist_session():
         session.permanent = True
 
+    @app.before_request
+    def block_banned_users():
+        # A ban must kill the account immediately, not just at next login:
+        # any authenticated API request from a removed account is rejected.
+        uid = session.get("user_id")
+        if not uid or not request.path.startswith("/api/"):
+            return
+        conn = get_db()  # cached per request; teardown closes it
+        row = exec(conn, "SELECT banned FROM users WHERE id=?",
+                   (uid,)).fetchone()
+        if row is None or row["banned"]:
+            session.pop("user_id", None)
+            return jsonify({"error": "Account removed."}), 403
+
     @app.teardown_appcontext
     def close_db(exc=None):
         db = g.pop("db", None)
@@ -619,7 +633,21 @@ def create_app(config=None):
         p = request.get_json(silent=True) or {}
         if p.get("password") != app.config["ADMIN_PASSWORD"]:
             return jsonify({"error": "Unauthorized."}), 401
+        # Fresh session: the admin identity must never piggyback on a
+        # (possibly banned) user identity in the same browser.
+        session.clear()
         session["admin"] = True
+        return jsonify({"ok": True})
+
+    @app.get("/api/admin/me")
+    def admin_me():
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        return jsonify({"ok": True})
+
+    @app.post("/api/admin/logout")
+    def admin_logout():
+        session.clear()
         return jsonify({"ok": True})
 
     @app.post("/api/forgot-password")
@@ -667,37 +695,41 @@ def create_app(config=None):
 
     @app.post("/api/admin/digest/send")
     def admin_digest_send():
-            if not session.get("admin"):
-                return jsonify({"error": "Unauthorized."}), 401
-            p = request.get_json(silent=True) or {}
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        p = request.get_json(silent=True) or {}
+        try:
             window_hours = int(p.get("window_hours") or 24)
-            conn = get_db()
-            cutoff = (datetime.now(timezone.utc)
-                      - timedelta(hours=window_hours)).isoformat()
-            rows = exec(conn,
-                "SELECT r.id, r.text, r.created_at, u.handle "
-                "FROM rumors r JOIN users u ON u.id = r.user_id "
-                "WHERE u.banned = 0 AND r.created_at >= ? "
-                "ORDER BY r.id DESC",
-                (cutoff,)).fetchall()
-            # Get emails of all non-banned users for digest delivery
-            user_emails = exec(conn,
-                "SELECT email FROM users WHERE banned=0").fetchall()
-            conn.close()
-            if not rows:
-                return jsonify({"ok": True, "sent": 0, "note": "no recent rumors"})
-            body = _render_digest(rows)
-            # Extract email addresses
-            to_addrs = [u["email"] for u in user_emails]
-            # Allow test injection of a fake sender via app.config["MAIL_SENDER"]
-            mailer = app.config.get("MAIL_SENDER")
-            if mailer:
-                for to in to_addrs:
-                    mailer(to, "Campus Whispers — today's top whispers", body)
-                sent = len(to_addrs)
-            else:
-                sent = _send_digest_smtp(app, to_addrs, body)
-            return jsonify({"ok": True, "sent": sent, "rumors": len(rows)})
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid window_hours."}), 400
+        window_hours = max(1, min(window_hours, 168))
+        conn = get_db()
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(hours=window_hours)).isoformat()
+        rows = exec(conn,
+            "SELECT r.id, r.text, r.created_at, u.handle "
+            "FROM rumors r JOIN users u ON u.id = r.user_id "
+            "WHERE u.banned = 0 AND r.created_at >= ? "
+            "ORDER BY r.id DESC",
+            (cutoff,)).fetchall()
+        # Get emails of all non-banned users for digest delivery
+        user_emails = exec(conn,
+            "SELECT email FROM users WHERE banned=0").fetchall()
+        conn.close()
+        if not rows:
+            return jsonify({"ok": True, "sent": 0, "note": "no recent rumors"})
+        body = _render_digest(rows)
+        # Extract email addresses
+        to_addrs = [u["email"] for u in user_emails]
+        # Allow test injection of a fake sender via app.config["MAIL_SENDER"]
+        mailer = app.config.get("MAIL_SENDER")
+        if mailer:
+            for to in to_addrs:
+                mailer(to, "Campus Whispers — today's top whispers", body)
+            sent = len(to_addrs)
+        else:
+            sent = _send_digest_smtp(app, to_addrs, body)
+        return jsonify({"ok": True, "sent": sent, "rumors": len(rows)})
 
 
     @app.get("/api/admin/rumors")
