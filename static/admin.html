@@ -64,12 +64,17 @@ async function adminLogin(){
 
 // The admin session cookie is persistent (30 days), so restore the panel
 // on load instead of forcing a fresh login — and keep logout real by
-// clearing the server session too.
+// clearing the server session too. Only a definitive 401/403 lands on the
+// login card; transient failures (cold start, 5xx) retry silently.
 (async function restoreAdmin(){
   try{
-    await api('GET','/api/admin/me');
-    showPanel();
-  }catch(e){/* no admin session — stay on the login card */}
+    const r = await fetch('/api/admin/me', { cache: 'no-store' });
+    if(r.ok){ showPanel(); return; }
+    if(r.status === 401 || r.status === 403){ return; } // stay on login card
+    setTimeout(restoreAdmin, 3000);
+  }catch(e){
+    setTimeout(restoreAdmin, 3000);
+  }
 })();
 
 function showPanel(){

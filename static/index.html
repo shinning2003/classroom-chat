@@ -356,13 +356,27 @@ function logout(){
 // Auto-login: the server keeps a 30-day session cookie, so restore the
 // session on every load instead of forcing a fresh login. The splash
 // stays up until this resolves — no login-screen flash on reload.
+// Only a definitive logged-out answer (401/403) shows the login screen;
+// transient failures (instance cold-start, 5xx, network) keep the splash
+// and retry so a valid session is never lost to a hiccup.
 (async function restoreSession(){
   try {
-    const d = await api('GET', '/api/me');
-    if(d && d.handle){ enterApp(d.handle); }
-    else { showLogin(); }
-  } catch(e){ showLogin(); }
-  finally { $('splash').classList.add('hidden'); }
+    const r = await fetch('/api/me', { cache: 'no-store' });
+    if(r.ok){
+      const d = await r.json();
+      if(d && d.handle){ enterApp(d.handle); }
+      else { showLogin(); }
+    } else if(r.status === 401 || r.status === 403){
+      showLogin();
+    } else {
+      setTimeout(restoreSession, 3000);
+      return;
+    }
+  } catch(e){
+    setTimeout(restoreSession, 3000);
+    return;
+  }
+  $('splash').classList.add('hidden');
 })();
 
 async function enterApp(handle){

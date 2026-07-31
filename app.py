@@ -133,7 +133,9 @@ def create_app(config=None):
 
     @app.post("/api/logout")
     def logout():
-        session.clear()
+        # Only drop the user identity — an admin session in the same
+        # browser must survive logging out of the chat app.
+        session.pop("user_id", None)
         return jsonify({"ok": True})
 
     @app.post("/api/rumors")
@@ -633,9 +635,10 @@ def create_app(config=None):
         p = request.get_json(silent=True) or {}
         if p.get("password") != app.config["ADMIN_PASSWORD"]:
             return jsonify({"error": "Unauthorized."}), 401
-        # Fresh session: the admin identity must never piggyback on a
-        # (possibly banned) user identity in the same browser.
-        session.clear()
+        # Admin and user identities live in the SAME cookie and are keyed
+        # separately ("admin" vs "user_id") — the owner uses both panels in
+        # one browser. Never clear the whole session here, or admin login
+        # would log the user out of the chat app.
         session["admin"] = True
         return jsonify({"ok": True})
 
@@ -647,7 +650,7 @@ def create_app(config=None):
 
     @app.post("/api/admin/logout")
     def admin_logout():
-        session.clear()
+        session.pop("admin", None)
         return jsonify({"ok": True})
 
     @app.post("/api/forgot-password")
