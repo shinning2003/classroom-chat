@@ -10,6 +10,7 @@ import socket
 import sqlite3
 import threading
 import time
+import json
 from datetime import datetime, timezone, timedelta
 
 from flask import Flask, jsonify, request, session, current_app, g
@@ -24,6 +25,12 @@ def create_app(config=None):
         ADMIN_PASSWORD=os.environ.get("ADMIN_PASSWORD", "admin123"),
         ADMIN_EMAIL=os.environ.get("ADMIN_EMAIL", "11surendiran2003@gmail.com"),
         SECRET_KEY=os.environ.get("SECRET_KEY", "dev-secret-change-me"),
+        # Web Push (VAPID). Keys are base64url; set on Render via env vars.
+        # When unset, push is disabled and the app degrades gracefully.
+        VAPID_PUBLIC_KEY=os.environ.get("VAPID_PUBLIC_KEY", ""),
+        VAPID_PRIVATE_KEY=os.environ.get("VAPID_PRIVATE_KEY", ""),
+        VAPID_SUBJECT=os.environ.get("VAPID_SUBJECT",
+                                     "mailto:11surendiran2003@gmail.com"),
         SESSION_PERMANENT=True,
         PERMANENT_SESSION_LIFETIME=timedelta(days=30),
     )
@@ -789,6 +796,21 @@ def create_app(config=None):
     def admin_page():
         return serve_page("admin.html")
 
+    @app.get("/sw.js")
+    def sw_js():
+        # Root-scoped so the service worker controls the whole app
+        resp = app.make_response(serve_page("sw.js"))
+        resp.headers["Content-Type"] = "application/javascript; charset=utf-8"
+        resp.headers["Service-Worker-Allowed"] = "/"
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+    @app.get("/manifest.json")
+    def manifest_json():
+        resp = app.make_response(serve_page("manifest.json"))
+        resp.headers["Content-Type"] = "application/manifest+json"
+        return resp
+
     @app.after_request
     def security_headers(resp):
         # Helmet equivalent for Flask (spec: security headers)
@@ -1046,6 +1068,26 @@ def create_app(config=None):
         handle_row = exec(conn, "SELECT handle FROM users WHERE id=?", (uid,)).fetchone()
         handle = handle_row["handle"] if handle_row else "unknown"
         points = _compute_points(conn, uid)  # keep leaderboard/points alive
+        # Fire push notifications to everyone else (fire-and-forget; the
+        # thread only does HTTP to the push service — never touches this conn).
+        try:
+            rows = exec(conn,
+                "SELECT endpoint, keys FROM push_subs WHERE user_id <> ?",
+                (uid,)).fetchall()
+            if rows:
+                subs = [{"endpoint": r["endpoint"], "keys": json.loads(r["keys"])}
+                        for r in rows]
+                payload = json.dumps({
+                    "title": "💬 Whisper Room",
+                    "body": f"@{handle}: {text[:80]}",
+                    "tag": "room",
+                    "url": "/",
+                }).encode("utf-8")
+                import threading
+                threading.Thread(target=_push_to_all,
+                                 args=(subs, payload), daemon=True).start()
+        except Exception:
+            pass  # push is best-effort; never break message posting
         conn.close()
         return jsonify({
             "id": mid,
@@ -1057,6 +1099,63 @@ def create_app(config=None):
         }), 201
 
     # === End Chat section ===
+
+    # === Push notifications (Web Push / VAPID) ===
+
+    @app.get("/api/push/config")
+    def push_config():
+        """Public VAPID key so the browser can subscribe. Auth-free: the
+        applicationServerKey is public by design."""
+        enabled = bool(app.config.get("VAPID_PUBLIC_KEY")
+                       and app.config.get("VAPID_PRIVATE_KEY"))
+        return jsonify({
+            "enabled": enabled,
+            "vapid_public": app.config.get("VAPID_PUBLIC_KEY") or None,
+        })
+
+    @app.post("/api/push/subscribe")
+    def push_subscribe():
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        p = request.get_json(silent=True) or {}
+        endpoint = (p.get("endpoint") or "").strip()
+        keys = p.get("keys") or {}
+        if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
+            return jsonify({"error": "Invalid subscription."}), 400
+        keys_json = json.dumps({"p256dh": keys["p256dh"], "auth": keys["auth"]})
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_db()
+        import psycopg
+        if isinstance(conn, psycopg.Connection):
+            exec(conn,
+                "INSERT INTO push_subs (user_id, endpoint, keys, created_at) "
+                "VALUES (?,?,?,?) ON CONFLICT (endpoint) DO UPDATE SET "
+                "user_id=EXCLUDED.user_id, keys=EXCLUDED.keys, "
+                "created_at=EXCLUDED.created_at",
+                (session["user_id"], endpoint, keys_json, now))
+        else:
+            exec(conn,
+                "INSERT OR REPLACE INTO push_subs "
+                "(user_id, endpoint, keys, created_at) VALUES (?,?,?,?)",
+                (session["user_id"], endpoint, keys_json, now))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+
+    @app.post("/api/push/unsubscribe")
+    def push_unsubscribe():
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        p = request.get_json(silent=True) or {}
+        endpoint = (p.get("endpoint") or "").strip()
+        if not endpoint:
+            return jsonify({"error": "Endpoint required."}), 400
+        conn = get_db()
+        exec(conn, "DELETE FROM push_subs WHERE endpoint=? AND user_id=?",
+             (endpoint, session["user_id"]))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
 
     # Schema is ensured lazily in get_db() on the first DB connection
     # (init_db(conn=...) after connect). Running it in a background thread
@@ -1649,6 +1748,16 @@ def init_db(db_path=None, conn=None):
                SELECT user_id, text, created_at FROM rumors
                WHERE NOT EXISTS (SELECT 1 FROM room_messages)"""
         )
+        # Push notification subscriptions
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS push_subs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                endpoint TEXT NOT NULL UNIQUE,
+                keys TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
     else:  # Postgres
         conn.execute(
             """CREATE TABLE IF NOT EXISTS users (
@@ -1807,6 +1916,16 @@ def init_db(db_path=None, conn=None):
                SELECT user_id, text, created_at FROM rumors
                WHERE NOT EXISTS (SELECT 1 FROM room_messages)"""
         )
+        # Push notification subscriptions (Postgres)
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS push_subs (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                endpoint TEXT NOT NULL UNIQUE,
+                keys TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
     conn.commit()
     # Don't close pool connections — the teardown handler returns them
     # (init_db is called inside app_context so close_db fires on exit)
@@ -1899,6 +2018,30 @@ def _count(conn, sql, params):
         return int(vals[0]) if vals else 0
     except Exception:
         return 0
+
+
+def _push_to_all(subscriptions, payload):
+    """Send a push payload to a list of subscriptions (HTTP only — never
+    touches the DB, safe to run in a thread). Best-effort: failures are
+    swallowed; expired subscriptions (404/410) are simply skipped."""
+    from flask import current_app
+    priv = current_app.config.get("VAPID_PRIVATE_KEY") or ""
+    subj = current_app.config.get("VAPID_SUBJECT") or ""
+    if not priv:
+        return
+    try:
+        from pywebpush import webpush, WebPushException
+    except ImportError:
+        return
+    body = payload if isinstance(payload, str) else payload.decode("utf-8")
+    for sub in subscriptions:
+        try:
+            webpush(sub, body, vapid_private_key=priv,
+                    vapid_claims={"sub": subj}, ttl=86400)
+        except WebPushException:
+            pass  # 404/410 = subscription gone; others = service hiccup
+        except Exception:
+            pass
 
 
 def _compute_points(conn, user_id):

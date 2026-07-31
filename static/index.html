@@ -3,6 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<meta name="theme-color" content="#0a0f1a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/static/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
 <title>Whisper Room</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -145,6 +152,7 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
   <div id="app-header">
     <h2>💬 Whisper Room</h2>
     <div class="user-info">
+      <span id="header-bell" title="Enable notifications" style="cursor:pointer;font-size:14px;opacity:.45" onclick="togglePush()">🔔</span>
       <span id="header-handle"></span>
       <span style="margin:0 6px;color:var(--muted)">·</span>
       <span id="header-pts" style="color:var(--accent)"></span>
@@ -195,7 +203,7 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
 </div>
 
 <script>
-let state = { user: null };
+let state = { user: null, pushOn: false };
 
 function $(id){return document.getElementById(id)}
 
@@ -214,6 +222,75 @@ async function api(method, path, body){
   const data = await r.json();
   if(!r.ok){ throw new Error(data.error || `HTTP ${r.status}`); }
   return data;
+}
+
+/* ======= PWA + Push notifications ======= */
+
+// Register the service worker (app installability + push delivery)
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+
+function urlBase64ToUint8Array(b64){
+  const pad = b64.replace(/=+$/, '');
+  const bin = atob(pad.replace(/-/g, '+').replace(/_/g, '/'));
+  const arr = new Uint8Array(bin.length);
+  for(let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr;
+}
+
+function pushSupported(){
+  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+}
+
+async function syncPushState(){
+  const bell = $('header-bell');
+  if(!bell || !pushSupported()) return;
+  try {
+    const cfg = await api('GET', '/api/push/config');
+    if(!cfg.enabled){ bell.style.display = 'none'; return; }
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    const on = !!sub;
+    state.pushOn = on;
+    bell.style.opacity = on ? 1 : .45;
+    bell.title = on ? 'Notifications on — tap to turn off' : 'Enable notifications';
+  } catch(e){ /* ignore */ }
+}
+
+async function togglePush(){
+  if(!pushSupported()){ toast('Notifications not supported on this device/browser.', true); return; }
+  try {
+    const cfg = await api('GET', '/api/push/config');
+    if(!cfg.enabled){ toast('Notifications are not configured yet.', true); return; }
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if(sub){
+      // turn off
+      try { await api('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint }); } catch(e){}
+      await sub.unsubscribe().catch(() => {});
+      state.pushOn = false;
+      $('header-bell').style.opacity = .45;
+      $('header-bell').title = 'Enable notifications';
+      toast('Notifications off');
+      return;
+    }
+    // turn on — requestPermission MUST come from this user gesture
+    const perm = await Notification.requestPermission();
+    if(perm !== 'granted'){ toast('Permission denied by browser.', true); return; }
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(cfg.vapid_public)
+    });
+    await api('POST', '/api/push/subscribe', {
+      endpoint: sub.endpoint,
+      keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }
+    });
+    state.pushOn = true;
+    $('header-bell').style.opacity = 1;
+    $('header-bell').title = 'Notifications on — tap to turn off';
+    toast('🔔 Notifications on! You\u2019ll be pinged when someone chats.');
+  } catch(e){ toast(e.message, true); }
 }
 
 /* Auth */
@@ -269,6 +346,7 @@ async function enterApp(handle){
   loadProfile();
   loadLeaderboard();
   startRoomPolling();
+  syncPushState();
 }
 
 /* Navigation */
