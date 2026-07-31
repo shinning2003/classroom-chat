@@ -283,7 +283,19 @@ def create_app(config=None):
             session.clear()
             conn.close()
             return jsonify({"error": "User not found."}), 404
-        streak, at_risk = _compute_streak(conn, uid)
+        streak, at_risk, run = _compute_streak(conn, uid)
+        # Streak Shield: a full 2-day miss would zero the streak; if the user
+        # owns a shield, consume one and restore the streak as of their last
+        # active day (today becomes the final grace day).
+        shield = exec(conn, "SELECT streak_shield FROM users WHERE id=?",
+                      (uid,)).fetchone()
+        shield_n = shield["streak_shield"] if shield and shield["streak_shield"] else 0
+        if streak == 0 and shield_n > 0:
+            exec(conn, "UPDATE users SET streak_shield = streak_shield - 1 WHERE id=?",
+                 (uid,))
+            conn.commit()
+            streak, at_risk = run, True
+            shield_n -= 1
         points = _compute_points(conn, uid)
         badges = _compute_badges(conn, uid)
         rank = _user_rank(conn, uid)
@@ -293,6 +305,16 @@ def create_app(config=None):
             "SELECT id FROM purchases WHERE user_id=? AND kind='featured' "
             "AND (expires_at IS NULL OR expires_at > ?)", (uid, now_iso)
         ).fetchone()
+        boost = exec(conn, "SELECT boost_until FROM users WHERE id=?",
+                     (uid,)).fetchone()
+        boost_active = bool(boost and boost["boost_until"]
+                            and boost["boost_until"] > now_iso)
+        ncol = exec(conn, "SELECT name_color, name_color_until FROM users WHERE id=?",
+                    (uid,)).fetchone()
+        name_color = None
+        if ncol and ncol["name_color"] and ncol["name_color_until"] \
+                and ncol["name_color_until"] > now_iso:
+            name_color = ncol["name_color"]
         recent_bumped = exec(conn,
             "SELECT id, text, created_at, bumped_at FROM rumors "
             "WHERE user_id=? AND bumped_at IS NOT NULL AND bumped_at >= ? "
@@ -314,6 +336,9 @@ def create_app(config=None):
                         "streak_at_risk_today": at_risk,
                         "points": points, "badges": badges, "rank": rank,
                         "featured": bool(feat),
+                        "boost_active": boost_active,
+                        "streak_shield": shield_n,
+                        "name_color": name_color,
                         "recent_bumped": recent_bumped_out})
 
     # --- Reward system: challenges, leaderboard (anonymized) ---
@@ -323,23 +348,23 @@ def create_app(config=None):
             return jsonify({"error": "Login required."}), 401
         conn = get_db()
         uid = session["user_id"]
-        week = _current_week()
         claimed = set()
         for r in exec(conn,
-                "SELECT challenge_key FROM challenge_claims WHERE user_id=? AND week=?",
-                (uid, week)).fetchall():
-            claimed.add(r[0] if not hasattr(r, "keys") else r["challenge_key"])
+                "SELECT challenge_key, week FROM challenge_claims WHERE user_id=?",
+                (uid,)).fetchall():
+            claimed.add((r["challenge_key"], r["week"]))
         out = []
         for key, label, goal, reward, kind in CHALLENGE_DEFS:
+            scope = _challenge_scope(kind)
             progress = _challenge_progress(conn, uid, kind)
             out.append({
                 "key": key, "label": label, "goal": goal, "reward": reward,
                 "progress": min(progress, goal),
                 "completed": progress >= goal,
-                "claimed": key in claimed,
+                "claimed": (key, scope) in claimed,
             })
         conn.close()
-        return jsonify({"week": week, "challenges": out})
+        return jsonify({"week": _current_week(), "challenges": out})
 
     @app.post("/api/challenges/<key>/claim")
     def claim_challenge(key):
@@ -351,20 +376,20 @@ def create_app(config=None):
         _k, _label, goal, _reward, kind = cdef
         conn = get_db()
         uid = session["user_id"]
-        week = _current_week()
+        scope = _challenge_scope(kind)
         if _challenge_progress(conn, uid, kind) < goal:
             conn.close()
             return jsonify({"error": "Challenge not complete yet."}), 400
         already = exec(conn,
             "SELECT 1 FROM challenge_claims WHERE user_id=? AND challenge_key=? AND week=?",
-            (uid, key, week)).fetchone()
+            (uid, key, scope)).fetchone()
         if already:
             conn.close()
             return jsonify({"error": "Already claimed this week."}), 400
         exec(conn,
             "INSERT INTO challenge_claims (user_id, challenge_key, week, claimed_at) "
             "VALUES (?,?,?,?)",
-            (uid, key, week, datetime.now(timezone.utc).isoformat()))
+            (uid, key, scope, datetime.now(timezone.utc).isoformat()))
         conn.commit()
         points = _compute_points(conn, uid)
         conn.close()
@@ -471,11 +496,37 @@ def create_app(config=None):
     # --- Shop: spend points on cosmetic/perk features ---
     @app.get("/api/shop")
     def list_shop():
-        """Return available shop items with prices."""
-        return jsonify({"items": {
-            k: {"label": v[0], "desc": v[1], "price": v[2]}
+        """Return available shop items with prices + the user's boost state."""
+        items = {
+            k: {"label": v[0], "desc": v[1], "price": v[2], "kind": k}
             for k, v in SHOP_ITEMS.items()
-        }})
+        }
+        me = None
+        if session.get("user_id"):
+            from datetime import datetime as _dt, timezone as _tz
+            conn = get_db()
+            uid = session["user_id"]
+            now_iso = _dt.now(_tz.utc).isoformat()
+            boost = exec(conn, "SELECT boost_until FROM users WHERE id=?",
+                         (uid,)).fetchone()
+            shield = exec(conn, "SELECT streak_shield FROM users WHERE id=?",
+                          (uid,)).fetchone()
+            ncol = exec(conn,
+                        "SELECT name_color, name_color_until FROM users WHERE id=?",
+                        (uid,)).fetchone()
+            conn.close()
+            name_color = None
+            if ncol and ncol["name_color"] and ncol["name_color_until"] \
+                    and ncol["name_color_until"] > now_iso:
+                name_color = ncol["name_color"]
+            me = {
+                "boost_active": bool(boost and boost["boost_until"]
+                                     and boost["boost_until"] > now_iso),
+                "streak_shield": shield["streak_shield"] if shield else 0,
+                "name_color": name_color,
+                "palette": NAME_COLORS,
+            }
+        return jsonify({"items": items, "me": me})
 
     @app.get("/api/me/whispers")
     def my_whispers():
@@ -534,60 +585,112 @@ def create_app(config=None):
                  "VALUES (?, ?, ?, ?)",
                  (uid, kind, alias, now))
 
-        elif kind == "highlight":
-            if not rumor_id:
+        elif kind == "name_color":
+            color = (p.get("color") or "").strip().lower()
+            match = next((c for c in NAME_COLORS if c.lower() == color), None)
+            if not match:
                 conn.close()
-                return jsonify({"error": "rumor_id required."}), 400
-            # Verify ownership
-            r = exec(conn,
-                "SELECT id FROM rumors WHERE id=? AND user_id=?",
-                (rumor_id, uid)).fetchone()
-            if not r:
-                conn.close()
-                return jsonify({"error": "Rumor not found or not yours."}), 404
-            exec(conn, "UPDATE rumors SET highlighted=1 WHERE id=?",
-                 (rumor_id,))
+                return jsonify({"error": "Pick a color from the palette."}), 400
+            expires = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
             exec(conn,
-                 "INSERT INTO purchases (user_id, kind, rumor_id, created_at) "
-                 "VALUES (?, ?, ?, ?)",
-                 (uid, kind, rumor_id, now))
+                 "UPDATE users SET name_color=?, name_color_until=? WHERE id=?",
+                 (match, expires, uid))
+            exec(conn,
+                 "INSERT INTO purchases (user_id, kind, meta, created_at, expires_at) "
+                 "VALUES (?, ?, ?, ?, ?)",
+                 (uid, kind, match, now, expires))
 
-        elif kind == "bump":
-            if not rumor_id:
+        elif kind in MESSAGE_ITEMS:
+            # highlight / ghost / pin target one of your own room messages
+            message_id = p.get("message_id") or p.get("rumor_id")
+            if not message_id:
                 conn.close()
-                return jsonify({"error": "rumor_id required."}), 400
-            r = exec(conn,
-                "SELECT id, bumped_at FROM rumors WHERE id=? AND user_id=?",
-                (rumor_id, uid)).fetchone()
-            if not r:
+                return jsonify({"error": "message_id required."}), 400
+            own = exec(conn,
+                "SELECT id FROM room_messages WHERE id=? AND user_id=?",
+                (message_id, uid)).fetchone()
+            if not own:
                 conn.close()
-                return jsonify({"error": "Rumor not found or not yours."}), 404
-            if r["bumped_at"] and _is_recent(r["bumped_at"], 24):
-                conn.close()
-                return jsonify({"error": "This whisper was bumped recently. Try again later."}), 400
-            exec(conn, "UPDATE rumors SET created_at=?, bumped_at=? WHERE id=?",
-                 (now, now, rumor_id))
+                return jsonify({"error": "Message not found or not yours."}), 404
+            if kind == "highlight":
+                exec(conn,
+                     "UPDATE room_messages SET highlighted=1, is_incognito=0 "
+                     "WHERE id=?", (message_id,))
+            elif kind == "ghost":
+                exec(conn,
+                     "UPDATE room_messages SET is_incognito=1, highlighted=0 "
+                     "WHERE id=?", (message_id,))
+            elif kind == "pin":
+                # One active pin per user: retire old pins, pin for 24h
+                exec(conn,
+                     "UPDATE room_messages SET pinned_until=NULL WHERE user_id=? "
+                     "AND pinned_until IS NOT NULL AND pinned_until > ?",
+                     (uid, now))
+                pin_until = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+                exec(conn, "UPDATE room_messages SET pinned_until=? WHERE id=?",
+                     (pin_until, message_id))
             exec(conn,
                  "INSERT INTO purchases (user_id, kind, rumor_id, created_at) "
                  "VALUES (?, ?, ?, ?)",
-                 (uid, kind, rumor_id, now))
+                 (uid, kind, message_id, now))
 
-        elif kind == "incognito":
-            if not rumor_id:
-                conn.close()
-                return jsonify({"error": "rumor_id required."}), 400
-            r = exec(conn,
-                "SELECT id FROM rumors WHERE id=? AND user_id=?",
-                (rumor_id, uid)).fetchone()
-            if not r:
-                conn.close()
-                return jsonify({"error": "Rumor not found or not yours."}), 404
-            exec(conn, "UPDATE rumors SET is_incognito=1, highlighted=0 "
-                 "WHERE id=?", (rumor_id,))
+        elif kind == "streak_shield":
             exec(conn,
-                 "INSERT INTO purchases (user_id, kind, rumor_id, created_at) "
+                 "UPDATE users SET streak_shield = COALESCE(streak_shield,0) + 1 "
+                 "WHERE id=?", (uid,))
+            exec(conn,
+                 "INSERT INTO purchases (user_id, kind, created_at) "
+                 "VALUES (?, ?, ?)", (uid, kind, now))
+
+        elif kind == "boost":
+            expires = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+            exec(conn, "UPDATE users SET boost_until=? WHERE id=?", (expires, uid))
+            exec(conn,
+                 "INSERT INTO purchases (user_id, kind, meta, created_at, expires_at) "
+                 "VALUES (?, ?, ?, ?, ?)",
+                 (uid, kind, expires, now, expires))
+
+        elif kind == "mystery_box":
+            import random as _rnd
+            roll = _rnd.random()
+            prize_label, prize_pts, prize_kind = "30 pts", 30, "pts"
+            cum = 0.0
+            for weight, pts, label in MYSTERY_PRIZES:
+                cum += weight
+                if roll <= cum:
+                    prize_pts, prize_label = pts, label
+                    prize_kind = "pts" if pts else "badge"
+                    break
+            if prize_kind == "pts":
+                exec(conn,
+                     "UPDATE users SET points_awarded = COALESCE(points_awarded,0) + ? "
+                     "WHERE id=?", (prize_pts, uid))
+            else:
+                # Free random flair badge; if they own all, fall back to 150 pts
+                owned = {r["meta"] for r in exec(conn,
+                    "SELECT meta FROM purchases WHERE user_id=? AND kind='badge'",
+                    (uid,)).fetchall()}
+                avail = [k for k in SHOP_ITEMS
+                         if k.startswith("badge_") and k not in owned]
+                if avail:
+                    prize_kind = "badge"
+                    pick = _rnd.choice(avail)
+                    prize_label = SHOP_ITEMS[pick][0]
+                    exec(conn,
+                         "INSERT INTO purchases (user_id, kind, meta, created_at) "
+                         "VALUES (?, ?, ?, ?)",
+                         (uid, "badge", pick, now))
+                else:
+                    prize_pts = 150
+                    prize_label = "150 pts"
+                    exec(conn,
+                         "UPDATE users SET points_awarded = COALESCE(points_awarded,0) + ? "
+                         "WHERE id=?", (prize_pts, uid))
+            exec(conn,
+                 "INSERT INTO purchases (user_id, kind, meta, created_at) "
                  "VALUES (?, ?, ?, ?)",
-                 (uid, kind, rumor_id, now))
+                 (uid, kind, f"won {prize_label}", now))
+            prize_out = f"You won {prize_label}!"
 
         elif kind == "featured":
             expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
@@ -616,7 +719,8 @@ def create_app(config=None):
         conn.commit()
         new_points = _compute_points(conn, uid)
         conn.close()
-        return jsonify({"ok": True, "points": new_points})
+        return jsonify({"ok": True, "points": new_points,
+                        "prize": prize_out if kind == "mystery_box" else None})
 
 
     # --- Feature 5: Tags + follow-a-tag (Investment / internal trigger) ---
@@ -1146,24 +1250,70 @@ def create_app(config=None):
 
     @app.get("/api/feed")
     def list_room_messages():
-        """Last 200 room messages (oldest-first) with sender handles."""
+        """Last 200 room messages (oldest-first) + active pins, with sender info."""
         if not session.get("user_id"):
             return jsonify({"error": "Login required."}), 401
         conn = get_db()
-        rows = exec(conn,
-            "SELECT rm.id, rm.user_id, rm.text, rm.created_at, u.handle "
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # Active pins (24h) always surface on top, newest pin first
+        pins = exec(conn,
+            "SELECT rm.id, rm.user_id, rm.text, rm.created_at, rm.pinned_until, "
+            "rm.highlighted, rm.is_incognito, u.handle, u.name_color "
             "FROM room_messages rm JOIN users u ON u.id = rm.user_id "
+            "WHERE rm.pinned_until IS NOT NULL AND rm.pinned_until > ? "
+            "ORDER BY rm.pinned_until DESC",
+            (now_iso,)).fetchall()
+        # Normal flow: exclude pinned messages so nothing renders twice
+        rows = exec(conn,
+            "SELECT rm.id, rm.user_id, rm.text, rm.created_at, rm.pinned_until, "
+            "rm.highlighted, rm.is_incognito, u.handle, u.name_color "
+            "FROM room_messages rm JOIN users u ON u.id = rm.user_id "
+            "WHERE rm.pinned_until IS NULL OR rm.pinned_until <= ? "
             "ORDER BY rm.id DESC LIMIT 200",
-            ()).fetchall()
-        msgs = [{
-            "id": r["id"],
-            "sender_id": r["user_id"],
-            "sender_handle": r["handle"],
-            "text": r["text"],
-            "created_at": r["created_at"],
-        } for r in reversed(rows)]
+            (now_iso,)).fetchall()
+
+        def msg(r):
+            return {
+                "id": r["id"],
+                "sender_id": r["user_id"],
+                "sender_handle": r["handle"],
+                "text": r["text"],
+                "created_at": r["created_at"],
+                "highlighted": bool(r["highlighted"]),
+                "is_incognito": bool(r["is_incognito"]),
+                "pinned_until": r["pinned_until"],
+                "name_color": r["name_color"],
+            }
+
+        pinned = [msg(r) for r in pins]
+        msgs = [msg(r) for r in reversed(rows)]
         conn.close()
-        return jsonify({"messages": msgs})
+        return jsonify({"messages": msgs, "pinned": pinned})
+
+    @app.get("/api/feed/mine")
+    def my_room_messages():
+        """The current user's own recent room messages (for shop targeting)."""
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        conn = get_db()
+        uid = session["user_id"]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        rows = exec(conn,
+            "SELECT id, text, created_at, highlighted, is_incognito, pinned_until "
+            "FROM room_messages WHERE user_id=? "
+            "ORDER BY id DESC LIMIT 10", (uid,)).fetchall()
+        conn.close()
+        out = []
+        for r in rows:
+            out.append({
+                "id": r["id"],
+                "preview": (r["text"] or "")[:80],
+                "created_at": r["created_at"],
+                "highlighted": bool(r["highlighted"]),
+                "is_incognito": bool(r["is_incognito"]),
+                "pinned": bool(r["pinned_until"] and r["pinned_until"] > now_iso),
+            })
+        return jsonify({"messages": out})
 
     @app.post("/api/feed")
     def post_room_message():
@@ -1192,8 +1342,34 @@ def create_app(config=None):
                 (uid, text, created_at))
             conn.commit()
             mid = cur.lastrowid
-        handle_row = exec(conn, "SELECT handle FROM users WHERE id=?", (uid,)).fetchone()
+        handle_row = exec(conn, "SELECT handle FROM users WHERE id=?",
+                          (uid,)).fetchone()
         handle = handle_row["handle"] if handle_row else "unknown"
+        # --- Daily streak bonus: first post of the day earns extra points ---
+        # base 10 + streak*2, capped at +20 — rewards consistency without
+        # making posting spam worthwhile.
+        bonus = 0
+        first_today = _count(conn,
+            "SELECT COUNT(*) FROM room_messages WHERE user_id=? AND created_at>=?",
+            (uid, _day_start_iso())) == 1
+        if first_today:
+            streak, _at_risk, _run = _compute_streak(conn, uid)
+            bonus = min(10 + streak * 2, 20)
+            exec(conn,
+                "UPDATE users SET points_awarded = COALESCE(points_awarded,0) + ? "
+                "WHERE id=?", (bonus, uid))
+            conn.commit()
+        # --- Double Points boost: +PTS_POST extra per post while active ---
+        boosted = False
+        brow = exec(conn, "SELECT boost_until FROM users WHERE id=?",
+                    (uid,)).fetchone()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if brow and brow["boost_until"] and brow["boost_until"] > now_iso:
+            exec(conn,
+                "UPDATE users SET points_awarded = COALESCE(points_awarded,0) + ? "
+                "WHERE id=?", (PTS_POST, uid))
+            conn.commit()
+            boosted = True
         points = _compute_points(conn, uid)  # keep leaderboard/points alive
         # Fire push notifications to everyone else (fire-and-forget; the
         # thread only does HTTP to the push service — never touches this conn).
@@ -1223,6 +1399,8 @@ def create_app(config=None):
             "text": text,
             "created_at": created_at,
             "points": points,
+            "bonus": bonus,
+            "boosted": boosted,
         }), 201
 
     # === End Chat section ===
@@ -1471,13 +1649,15 @@ def _conn_is_pg(conn):
 
 
 def _compute_streak(conn, user_id):
-    """Return (streak, at_risk_today).
+    """Return (streak, at_risk_today, run).
 
     Streak = consecutive distinct UTC calendar days with >=1 post, ending
     today or yesterday (1-day grace window so a single missed day doesn't
     shatter the streak — recovery prevents churn per Nikzad 2021).
     at_risk_today is True when the last post was yesterday: today is the
     final grace day to keep the streak alive (loss-aversion trigger).
+    run = the consecutive-day run ending at the most recent active day
+    (used by the Streak Shield to restore a streak after a deeper miss).
     """
     from datetime import datetime, timezone, date, timedelta
     rows = exec(conn,
@@ -1486,28 +1666,29 @@ def _compute_streak(conn, user_id):
         "SELECT DISTINCT substr(created_at,1,10) AS d FROM room_messages "
         "WHERE user_id=? ORDER BY d DESC", (user_id, user_id)).fetchall()
     if not rows:
-        return 0, False
+        return 0, False, 0
     dates = [r["d"] for r in rows]
     today = datetime.now(timezone.utc).date()
     yesterday = today - timedelta(days=1)
     # group into consecutive-day runs from most recent backward
-    streak = 1
+    run = 1
     for prev, cur in zip(dates, dates[1:]):
         d_prev = date.fromisoformat(prev)
         d_cur = date.fromisoformat(cur)
         if (d_prev - d_cur).days == 1:
-            streak += 1
+            run += 1
         else:
             break
     most_recent = date.fromisoformat(dates[0])
+    preserved_run = run  # streak as of the last active day (Streak Shield)
     at_risk = False
     if most_recent == today:
         at_risk = False
     elif most_recent == yesterday:
         at_risk = True
     else:
-        streak = 0
-    return streak, at_risk
+        run = 0
+    return run, at_risk, preserved_run
 
 
 def rumor_admin(row):
@@ -1816,7 +1997,11 @@ def init_db(db_path=None, conn=None):
         for col, typ in [("points", "INTEGER NOT NULL DEFAULT 0"),
                          ("points_spent", "INTEGER NOT NULL DEFAULT 0"),
                          ("points_awarded", "INTEGER NOT NULL DEFAULT 0"),
-                         ("custom_alias", "TEXT")]:
+                         ("custom_alias", "TEXT"),
+                         ("name_color", "TEXT"),
+                         ("name_color_until", "TEXT"),
+                         ("streak_shield", "INTEGER NOT NULL DEFAULT 0"),
+                         ("boost_until", "TEXT")]:
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
             except Exception:
@@ -1875,6 +2060,14 @@ def init_db(db_path=None, conn=None):
                SELECT user_id, text, created_at FROM rumors
                WHERE NOT EXISTS (SELECT 1 FROM room_messages)"""
         )
+        # Room-message shop effects (self-healing column adds)
+        for col, typ in [("highlighted", "INTEGER NOT NULL DEFAULT 0"),
+                         ("is_incognito", "INTEGER NOT NULL DEFAULT 0"),
+                         ("pinned_until", "TEXT")]:
+            try:
+                conn.execute(f"ALTER TABLE room_messages ADD COLUMN {col} {typ}")
+            except Exception:
+                pass
         # Push notification subscriptions
         conn.execute(
             """CREATE TABLE IF NOT EXISTS push_subs (
@@ -1907,6 +2100,19 @@ def init_db(db_path=None, conn=None):
             conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS selected_badge TEXT DEFAULT NULL")
         except Exception:
             pass
+        # Self-heal: shop/economy columns
+        for col, typ in [("points", "INTEGER NOT NULL DEFAULT 0"),
+                         ("points_spent", "INTEGER NOT NULL DEFAULT 0"),
+                         ("points_awarded", "INTEGER NOT NULL DEFAULT 0"),
+                         ("custom_alias", "TEXT"),
+                         ("name_color", "TEXT"),
+                         ("name_color_until", "TEXT"),
+                         ("streak_shield", "INTEGER NOT NULL DEFAULT 0"),
+                         ("boost_until", "TEXT")]:
+            try:
+                conn.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {typ}")
+            except Exception:
+                pass
         conn.execute(
             """CREATE TABLE IF NOT EXISTS rumors (
                 id SERIAL PRIMARY KEY,
@@ -2043,6 +2249,14 @@ def init_db(db_path=None, conn=None):
                SELECT user_id, text, created_at FROM rumors
                WHERE NOT EXISTS (SELECT 1 FROM room_messages)"""
         )
+        # Room-message shop effects (self-healing column adds)
+        for col, typ in [("highlighted", "INTEGER NOT NULL DEFAULT 0"),
+                         ("is_incognito", "INTEGER NOT NULL DEFAULT 0"),
+                         ("pinned_until", "TEXT")]:
+            try:
+                conn.execute(f"ALTER TABLE room_messages ADD COLUMN IF NOT EXISTS {col} {typ}")
+            except Exception:
+                pass
         # Push notification subscriptions (Postgres)
         conn.execute(
             """CREATE TABLE IF NOT EXISTS push_subs (
@@ -2098,22 +2312,48 @@ BADGE_DEFS = [  # (key, label, post threshold)
     ("five_hundred", "Anonymous Icon", 500),
 ]
 
-# Weekly challenges: key -> (label, goal, reward points, kind).
+# Weekly + daily challenges: key -> (label, goal, reward points, kind).
+# kind "post" = this week's room messages; kind "daily" = today's messages.
 CHALLENGE_DEFS = [
-    ("post_3", "Post 3 whispers this week", 3, 30, "post"),
+    ("post_3", "Post 3 messages this week", 3, 30, "post"),
+    ("post_10", "Post 10 messages this week", 10, 80, "post"),
+    ("daily_3", "Post 3 messages today", 3, 30, "daily"),
+]
+
+# Name-color whitelist (never render arbitrary CSS from the client).
+NAME_COLORS = ["#FF6B6B", "#FFA94D", "#FFD43B", "#69DB7C", "#4DABF7",
+               "#9775FA", "#F783AC", "#20C997", "#FF922B", "#748FFC"]
+
+# Mystery Box prize table: (cumulative weight, pts, label). 96% points,
+# 4% a free purchasable flair badge.
+MYSTERY_PRIZES = [
+    (0.40, 30, "30 pts"),
+    (0.25, 60, "60 pts"),
+    (0.15, 100, "100 pts"),
+    (0.10, 150, "150 pts"),
+    (0.06, 250, "250 pts"),
+    (0.04, 0, "BADGE"),
 ]
 
 # Shop: item key -> (label, description, price).
 SHOP_ITEMS = {
-    "alias": ("✏️ Custom Alias", "Set a custom display name on your whispers (max 30 chars)", 80),
-    "highlight": ("✨ Highlight Whisper", "Add a glowing border to one of your whispers", 50),
-    "bump": ("⏫ Bump Whisper", "Push one of your whispers back to the top of the feed", 30),
+    "alias": ("✏️ Custom Alias", "Set a custom display name on your messages (max 30 chars)", 80),
+    "name_color": ("🎨 Name Color", "Colored handle in the room for 30 days", 60),
+    "highlight": ("✨ Highlight Message", "Glowing border on one of your room messages", 50),
+    "ghost": ("👻 Ghost Message", "One room message with no handle — ghost mode", 150),
+    "pin": ("📌 Pin to Top", "Pin one of your messages to the top of the room for 24h", 100),
+    "streak_shield": ("🧊 Streak Shield", "Survives one missed day without breaking your streak", 80),
+    "boost": ("🚀 Double Points", "2× points on every post for the next 24h", 120),
+    "mystery_box": ("🎁 Mystery Box", "Random prize: 30–250 pts or a free flair badge", 90),
     "featured": ("👑 Featured Spot", "Featured badge on your profile for 1 week", 200),
-    "incognito": ("👻 Incognito", "Make one whisper show no handle — ghost mode", 150),
     "badge_smooth": ("Smooth Talker 🎩", "Equip the Smooth Talker badge as your flair", 100),
     "badge_mystery": ("Mystery Guest 🎭", "Equip the Mystery Guest badge as your flair", 150),
     "badge_veteran": ("Veteran 👑", "Equip the Veteran badge as your flair", 200),
+    "badge_crown": ("Crown Royal 👑", "Equip the Crown Royal badge as your flair", 300),
 }
+
+# Items that target one of your own room messages.
+MESSAGE_ITEMS = {"highlight", "ghost", "pin"}
 
 
 def _current_week():
@@ -2130,6 +2370,19 @@ def _week_start_iso():
     monday = now - timedelta(days=now.weekday())
     monday = monday.replace(hour=0, minute=0, second=0, microsecond=0)
     return monday.isoformat()
+
+
+def _day_start_iso():
+    """UTC midnight today, ISO string for created_at compares."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+
+def _challenge_scope(kind):
+    """Claim scope: weekly challenges reset per ISO week, daily per calendar day."""
+    from datetime import date
+    return _current_week() if kind != "daily" else date.today().isoformat()
 
 
 def _count(conn, sql, params):
@@ -2236,14 +2489,19 @@ def _compute_badges(conn, user_id):
 
 
 def _challenge_progress(conn, user_id, kind):
-    """Count this-week activity for a challenge kind."""
-    ws = _week_start_iso()
+    """Count this-week (or today's) activity for a challenge kind."""
     if kind == "post":
+        ws = _week_start_iso()
         return _count(conn,
             "SELECT COUNT(*) FROM rumors WHERE user_id=? AND created_at>=?",
             (user_id, ws)) + _count(conn,
             "SELECT COUNT(*) FROM room_messages WHERE user_id=? AND created_at>=?",
             (user_id, ws))
+    if kind == "daily":
+        ds = _day_start_iso()
+        return _count(conn,
+            "SELECT COUNT(*) FROM room_messages WHERE user_id=? AND created_at>=?",
+            (user_id, ds))
     if kind == "react":
         # reactions table has no created_at; count all this user's reactions
         return _count(conn, "SELECT COUNT(*) FROM reactions WHERE user_id=?",
