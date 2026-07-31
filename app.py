@@ -993,6 +993,69 @@ def create_app(config=None):
             "text": text, "created_at": created_at,
         }), 201
 
+    # === Group room (the feed is a shared group chat) ===
+
+    @app.get("/api/feed")
+    def list_room_messages():
+        """Last 200 room messages (oldest-first) with sender handles."""
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        conn = get_db()
+        rows = exec(conn,
+            "SELECT rm.id, rm.user_id, rm.text, rm.created_at, u.handle "
+            "FROM room_messages rm JOIN users u ON u.id = rm.user_id "
+            "ORDER BY rm.id DESC LIMIT 200",
+            ()).fetchall()
+        msgs = [{
+            "id": r["id"],
+            "sender_id": r["user_id"],
+            "sender_handle": r["handle"],
+            "text": r["text"],
+            "created_at": r["created_at"],
+        } for r in reversed(rows)]
+        conn.close()
+        return jsonify({"messages": msgs})
+
+    @app.post("/api/feed")
+    def post_room_message():
+        """Post a message to the group room; awards points like a post."""
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required."}), 401
+        p = request.get_json(silent=True) or {}
+        text = (p.get("text") or "").strip()[:1000]
+        if not text:
+            return jsonify({"error": "Message text is required."}), 400
+        uid = session["user_id"]
+        created_at = datetime.now(timezone.utc).isoformat()
+        conn = get_db()
+        import psycopg
+        if isinstance(conn, psycopg.Connection):
+            cur = exec(conn,
+                "INSERT INTO room_messages (user_id, text, created_at) "
+                "VALUES (?,?,?) RETURNING id",
+                (uid, text, created_at))
+            conn.commit()
+            mid = cur.fetchone()["id"]
+        else:
+            cur = exec(conn,
+                "INSERT INTO room_messages (user_id, text, created_at) "
+                "VALUES (?,?,?)",
+                (uid, text, created_at))
+            conn.commit()
+            mid = cur.lastrowid
+        handle_row = exec(conn, "SELECT handle FROM users WHERE id=?", (uid,)).fetchone()
+        handle = handle_row["handle"] if handle_row else "unknown"
+        points = _compute_points(conn, uid)  # keep leaderboard/points alive
+        conn.close()
+        return jsonify({
+            "id": mid,
+            "sender_id": uid,
+            "sender_handle": handle,
+            "text": text,
+            "created_at": created_at,
+            "points": points,
+        }), 201
+
     # === End Chat section ===
 
     # Schema is ensured lazily in get_db() on the first DB connection
@@ -1193,7 +1256,9 @@ def _compute_streak(conn, user_id):
     from datetime import datetime, timezone, date, timedelta
     rows = exec(conn,
         "SELECT DISTINCT substr(created_at,1,10) AS d FROM rumors "
-        "WHERE user_id=? ORDER BY d DESC", (user_id,)).fetchall()
+        "WHERE user_id=? UNION "
+        "SELECT DISTINCT substr(created_at,1,10) AS d FROM room_messages "
+        "WHERE user_id=? ORDER BY d DESC", (user_id, user_id)).fetchall()
     if not rows:
         return 0, False
     dates = [r["d"] for r in rows]
@@ -1568,6 +1633,21 @@ def init_db(db_path=None, conn=None):
                 created_at TEXT NOT NULL
             )"""
         )
+        # Group room (the feed is now a shared group chat)
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS room_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        # One-time seed: migrate existing rumors into the room as history
+        conn.execute(
+            """INSERT INTO room_messages (user_id, text, created_at)
+               SELECT user_id, text, created_at FROM rumors
+               WHERE NOT EXISTS (SELECT 1 FROM room_messages)"""
+        )
     else:  # Postgres
         conn.execute(
             """CREATE TABLE IF NOT EXISTS users (
@@ -1711,6 +1791,21 @@ def init_db(db_path=None, conn=None):
                 created_at TEXT NOT NULL
             )"""
         )
+        # Group room (the feed is now a shared group chat)
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS room_messages (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        # One-time seed: migrate existing rumors into the room as history
+        conn.execute(
+            """INSERT INTO room_messages (user_id, text, created_at)
+               SELECT user_id, text, created_at FROM rumors
+               WHERE NOT EXISTS (SELECT 1 FROM room_messages)"""
+        )
     conn.commit()
     # Don't close pool connections — the teardown handler returns them
     # (init_db is called inside app_context so close_db fires on exit)
@@ -1811,6 +1906,8 @@ def _compute_points(conn, user_id):
     metoo_recv = _count(conn,
         "SELECT COUNT(*) FROM me_too m JOIN rumors r ON r.id=m.rumor_id "
         "WHERE r.user_id=?", (user_id,))
+    room_posts = _count(conn,
+        "SELECT COUNT(*) FROM room_messages WHERE user_id=?", (user_id,))
     # claimed challenge rewards
     claim_pts = 0
     rows = exec(conn,
@@ -1820,7 +1917,7 @@ def _compute_points(conn, user_id):
     for r in rows:
         key = r[0] if not hasattr(r, "keys") else r["challenge_key"]
         claim_pts += reward_by_key.get(key, 0)
-    earned = (posts * PTS_POST +
+    earned = ((posts + room_posts) * PTS_POST +
               react_given * PTS_REACT_GIVEN + react_recv * PTS_REACT_RECEIVED +
               metoo_recv * PTS_METOO_RECEIVED + claim_pts)
     # admin-awarded bonus points
@@ -1840,10 +1937,13 @@ def _compute_points(conn, user_id):
 
 def _compute_badges(conn, user_id):
     """Return unlocked badges (list of {key,label}) — earned + purchased."""
-    posts = _count(conn, "SELECT COUNT(*) FROM rumors WHERE user_id=?", (user_id,))
+    posts = _count(conn, "SELECT COUNT(*) FROM rumors WHERE user_id=?",
+                   (user_id,))
+    room_posts = _count(conn, "SELECT COUNT(*) FROM room_messages WHERE user_id=?",
+                        (user_id,))
     out = []
     for key, label, threshold in BADGE_DEFS:
-        if posts >= threshold:
+        if posts + room_posts >= threshold:
             out.append({"key": key, "label": label})
     # Include purchased flair badges
     rows = exec(conn,
@@ -1863,6 +1963,8 @@ def _challenge_progress(conn, user_id, kind):
     if kind == "post":
         return _count(conn,
             "SELECT COUNT(*) FROM rumors WHERE user_id=? AND created_at>=?",
+            (user_id, ws)) + _count(conn,
+            "SELECT COUNT(*) FROM room_messages WHERE user_id=? AND created_at>=?",
             (user_id, ws))
     if kind == "react":
         # reactions table has no created_at; count all this user's reactions

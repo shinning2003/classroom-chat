@@ -40,25 +40,12 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
 .nav-item.active{color:var(--accent)}
 .nav-item svg{display:block;margin:0 auto 2px}
 
-/* Feed */
-.rumor-card{background:var(--surface);border-radius:var(--radius);border:1px solid var(--border);padding:14px;margin-bottom:10px}
-.rumor-card .meta{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:6px}
-.rumor-card .handle{color:var(--accent);font-weight:600}
-.rumor-card .text{font-size:14px;line-height:1.5;margin-bottom:8px;word-break:break-word}
-.rumor-card .actions{display:flex;gap:8px;font-size:12px}
-.rumor-card .actions span{cursor:default;color:var(--muted)}
-.rumor-card.highlighted{border-color:var(--accent);box-shadow:0 0 8px var(--accent-glow)}
-.rumor-card .tags{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px}
-.rumor-card .tag{font-size:11px;background:var(--surface2);padding:2px 8px;border-radius:20px;color:var(--muted)}
-.rumor-card .badge{font-size:11px;padding:1px 6px;border-radius:10px;background:var(--accent);color:#0a0f1a;margin-left:6px}
-.rumor-card .is-new{color:#22c55e;font-size:10px;margin-left:4px}
-
 /* Compose */
-#compose-area{padding:10px 0}
-#compose-area textarea{margin-bottom:8px}
-#compose-area .compose-tags{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
-.tag-chip{font-size:12px;background:var(--surface2);padding:3px 10px;border-radius:20px;border:1px solid var(--border);cursor:pointer}
-.tag-chip.active{background:var(--accent);color:#0a0f1a;border-color:var(--accent)}
+/* Group room (feed = chat) */
+#room-area{display:flex;flex-direction:column;height:calc(100vh - 130px)}
+#room-msgs{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+#room-input-area{display:flex;gap:8px;padding:8px 12px;background:var(--surface);border-top:1px solid var(--border)}
+#room-input-area input{flex:1}
 
 /* Tabs content */
 .tab-content{display:none}
@@ -104,16 +91,8 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
 .toast.error{border-color:var(--danger)}
 @keyframes fadeIn{from{opacity:0;transform:translateX(-50%) translateY(-8px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 
-/* Tags tab */
-.tag-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)}
-.tag-row .name{font-size:14px}
-.tag-row .count{font-size:12px;color:var(--muted)}
-.tag-row .follow-btn{font-size:12px}
-
-/* Sort bar */
+/* Sort bar (kept for potential reuse) */
 .sort-bar{display:flex;gap:6px;margin-bottom:10px;overflow-x:auto;padding:2px 0}
-.sort-btn{font-size:12px;padding:4px 12px;border-radius:20px;background:var(--surface2);border:1px solid var(--border);cursor:pointer;white-space:nowrap;color:var(--muted)}
-.sort-btn.active{background:var(--accent);color:#0a0f1a;border-color:var(--accent)}
 
 .empty-state{text-align:center;color:var(--muted);padding:40px 20px;font-size:14px}
 .loading{text-align:center;padding:20px;color:var(--muted)}
@@ -193,32 +172,15 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
     </div>
   </div>
   <div id="main-content">
-    <!-- Feed tab -->
+    <!-- Feed tab = group chat -->
     <div class="tab-content active" id="tab-feed">
-      <div id="compose-area">
-        <textarea id="compose-text" placeholder="Drop a whisper…" maxlength="500"></textarea>
-        <div class="compose-tags" id="compose-tags">
-          <span class="tag-chip" data-tag="confession">#confession</span>
-          <span class="tag-chip" data-tag="joke">#joke</span>
-          <span class="tag-chip" data-tag="crush">#crush</span>
-          <span class="tag-chip" data-tag="rant">#rant</span>
-          <span class="tag-chip" data-tag="question">#question</span>
-          <span class="tag-chip" data-tag="advice">#advice</span>
+      <div id="room-area">
+        <div id="room-msgs"></div>
+        <div id="room-input-area">
+          <input id="room-input" placeholder="Message the group…" maxlength="500" onkeydown="if(event.key==='Enter')sendRoomMsg()">
+          <button class="btn btn-sm btn-primary" onclick="sendRoomMsg()">Send</button>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="postRumor()">💬 Whisper</button>
       </div>
-      <div class="sort-bar" id="sort-bar">
-        <span class="sort-btn active" data-sort="new">New</span>
-        <span class="sort-btn" data-sort="hot">Hot</span>
-        <span class="sort-btn" data-sort="rising">Rising</span>
-        <span class="sort-btn" id="filter-followed" data-filter="followed">Followed</span>
-      </div>
-      <div id="feed"></div>
-    </div>
-    <!-- Tags tab -->
-    <div class="tab-content" id="tab-tags">
-      <h3 style="margin-bottom:10px;font-size:16px">🏷️ Tags</h3>
-      <div id="tags-list"></div>
     </div>
     <!-- Leaderboard tab -->
     <div class="tab-content" id="tab-leaderboard">
@@ -251,10 +213,6 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       Feed
     </div>
-    <div class="nav-item" data-tab="tags">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
-      Tags
-    </div>
     <div class="nav-item" data-tab="leaderboard">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5C7 4 6 9 6 9z"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5C17 4 18 9 18 9z"/><path d="M4 22h16"/><path d="M10 22V2h4v20"/><path d="M6 14v-3"/><path d="M18 14v-3"/></svg>
       Top
@@ -285,7 +243,7 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
 </div>
 
 <script>
-let state = { user: null, currentSort: 'new', currentFilter: '', currentTag: '' };
+let state = { user: null };
 
 function $(id){return document.getElementById(id)}
 
@@ -344,6 +302,7 @@ async function forgotPassword(){
 
 function logout(){
   state.user = null;
+  if(roomPollTimer){ clearInterval(roomPollTimer); roomPollTimer = null; }
   $('app').classList.add('hidden');
   $('auth-screen').classList.remove('hidden');
   $('login-id').value = '';
@@ -356,9 +315,8 @@ async function enterApp(handle){
   $('header-handle').textContent = '@' + handle;
   state.user = { handle };
   loadProfile();
-  loadFeed();
-  loadTags();
   loadLeaderboard();
+  startRoomPolling();
 }
 
 /* Navigation */
@@ -368,86 +326,50 @@ document.querySelectorAll('.nav-item').forEach(el => {
     el.classList.add('active');
     document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
     $(`tab-${el.dataset.tab}`).classList.add('active');
-    if(el.dataset.tab === 'feed') loadFeed();
-    if(el.dataset.tab === 'tags') loadTags();
+    if(el.dataset.tab === 'feed') loadRoom();
     if(el.dataset.tab === 'leaderboard') { loadLeaderboard(); loadChallenges(); }
     if(el.dataset.tab === 'profile') { loadProfile(); loadShop(); }
     if(el.dataset.tab === 'chat') { loadConversations(); }
   });
 });
 
-/* Sort */
-document.querySelectorAll('.sort-btn').forEach(el => {
-  el.addEventListener('click', () => {
-    document.querySelectorAll('.sort-btn').forEach(x => x.classList.remove('active'));
-    el.classList.add('active');
-    if(el.dataset.sort){ state.currentSort = el.dataset.sort; state.currentFilter = ''; state.currentTag = ''; }
-    if(el.dataset.filter){ state.currentFilter = el.dataset.filter; state.currentSort = ''; state.currentTag = ''; }
-    loadFeed();
-  });
-});
+/* ======= Group Room (Feed = group chat) ======= */
 
-/* Compose tags */
-const selectedTags = new Set();
-document.querySelectorAll('.tag-chip').forEach(el => {
-  el.addEventListener('click', () => {
-    el.classList.toggle('active');
-    const tag = el.dataset.tag;
-    if(selectedTags.has(tag)) selectedTags.delete(tag); else selectedTags.add(tag);
-  });
-});
+let roomPollTimer = null;
 
-/* Feed */
-async function loadFeed(){
-  const el = $('feed');
-  el.innerHTML = '<div class="loading">Loading whispers…</div>';
-  try {
-    let url = '/api/rumors?sort=' + state.currentSort;
-    if(state.currentFilter) url += '&filter=' + state.currentFilter;
-    if(state.currentTag) url += '&tag=' + state.currentTag;
-    const d = await api('GET', url);
-    if(!d.rumors || d.rumors.length === 0){
-      el.innerHTML = '<div class="empty-state">No whispers yet. Be the first! 💬</div>';
-      return;
-    }
-    el.innerHTML = d.rumors.map(r => renderRumor(r)).join('');
-  } catch(e){
-    el.innerHTML = '<div class="empty-state">Could not load whispers.</div>';
-  }
+function startRoomPolling(){
+  if(roomPollTimer) return;
+  loadRoom();
+  roomPollTimer = setInterval(loadRoom, 2000);
 }
 
-function renderRumor(r){
-  const hl = r.highlighted ? ' highlighted' : '';
-  const tags = r.tags ? r.tags.map(t => `<span class="tag">#${t}</span>`).join('') : '';
-  const badge = r.badge_label ? `<span class="badge">${r.badge_label}</span>` : '';
-  const isNew = r.is_new ? '<span class="is-new">🆕</span>' : '';
-  const bumpTag = r.bumped ? '<span class="tag" style="color:var(--accent)">⬆ recent</span>' : '';
-  return `<div class="rumor-card${hl}">
-    <div class="meta">
-      <span class="handle">${r.handle}${badge}${isNew}</span>
-      <span>${new Date(r.created_at).toLocaleDateString()}</span>
-    </div>
-    <div class="text">${escHtml(r.text)}</div>
-    ${tags ? `<div class="tags">${tags}${bumpTag}</div>` : `<div class="tags">${bumpTag}</div>`}
-  </div>`;
+async function loadRoom(){
+  try {
+    const d = await api('GET', '/api/feed');
+    const el = $('room-msgs');
+    if(!d.messages || !d.messages.length){
+      if(!el.querySelector('.empty-state')) el.innerHTML = '<div class="empty-state" style="padding:20px">No messages yet. Say hello! 👋</div>';
+      return;
+    }
+    el.innerHTML = d.messages.map(renderMessage).join('');
+    el.scrollTop = el.scrollHeight;
+  } catch(e){ /* ignore */ }
+}
+
+async function sendRoomMsg(){
+  const input = $('room-input');
+  const text = input.value.trim();
+  if(!text) return;
+  input.value = '';
+  try {
+    const d = await api('POST', '/api/feed', { text });
+    if(d.points !== undefined) $('header-pts').textContent = d.points + ' pts';
+    loadProfile();
+    await loadRoom();
+  } catch(e){ toast(e.message, true); }
 }
 
 function escHtml(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
-
-/* Post */
-async function postRumor(){
-  const text = $('compose-text').value.trim();
-  if(!text){ toast('Write something!', true); return; }
-  try {
-    await api('POST', '/api/rumors', { text, tags: [...selectedTags] });
-    $('compose-text').value = '';
-    document.querySelectorAll('.tag-chip').forEach(x => x.classList.remove('active'));
-    selectedTags.clear();
-    toast('Whisper posted!');
-    loadFeed();
-    loadProfile();
-  } catch(e){ toast(e.message, true); }
-}
 
 /* Profile */
 async function loadProfile(){
@@ -498,33 +420,6 @@ async function buyItem(kind){
     loadProfile();
     loadShop();
   } catch(e){ toast(e.message, true); }
-}
-
-/* Tags */
-async function loadTags(){
-  try {
-    const d = await api('GET', '/api/tags');
-    let followed = [];
-    try { const f = await api('GET', '/api/me/tags'); followed = f.followed_tags || []; } catch(e){}
-    if(!d.tags || !d.tags.length){ $('tags-list').innerHTML = '<div class="empty-state">No tags yet.</div>'; return; }
-    $('tags-list').innerHTML = d.tags.map(t => {
-      const isFollowing = followed.includes(t.name);
-      return `<div class="tag-row">
-        <div><span class="name">#${t.name}</span> <span class="count">${t.count} whispers</span></div>
-        <button class="btn btn-sm ${isFollowing?'btn-danger':'btn-ghost'} follow-btn"
-          onclick="${isFollowing ? `unfollowTag('${t.name}')` : `followTag('${t.name}')`}">
-          ${isFollowing ? 'Unfollow' : 'Follow'}
-        </button>
-      </div>`;
-    }).join('');
-  } catch(e){ $('tags-list').innerHTML = '<div class="empty-state">Could not load tags.</div>'; }
-}
-
-async function followTag(name){
-  try { await api('POST', `/api/tags/${name}/follow`); toast('Following #' + name); loadTags(); } catch(e){ toast(e.message, true); }
-}
-async function unfollowTag(name){
-  try { await api('DELETE', `/api/tags/${name}/follow`); toast('Unfollowed #' + name); loadTags(); } catch(e){ toast(e.message, true); }
 }
 
 /* Leaderboard */
