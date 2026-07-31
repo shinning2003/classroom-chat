@@ -330,13 +330,25 @@ async function forgotPassword(){
 }
 
 function logout(){
+  // Best-effort server-side clear; UI hides regardless.
+  fetch('/api/logout', { method: 'POST' }).catch(() => {});
   state.user = null;
+  state.pushOn = false;
   if(roomPollTimer){ clearInterval(roomPollTimer); roomPollTimer = null; }
   $('app').classList.add('hidden');
   $('auth-screen').classList.remove('hidden');
   $('login-id').value = '';
   $('login-pass').value = '';
 }
+
+// Auto-login: the server keeps a 30-day session cookie, so restore the
+// session on every load instead of forcing a fresh login.
+(async function restoreSession(){
+  try {
+    const d = await api('GET', '/api/me');
+    if(d && d.handle){ enterApp(d.handle); }
+  } catch(e){ /* no valid session — stay on the auth screen */ }
+})();
 
 async function enterApp(handle){
   $('auth-screen').classList.add('hidden');

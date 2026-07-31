@@ -117,6 +117,11 @@ def create_app(config=None):
         session["user_id"] = row["id"]
         return jsonify({"ok": True, "handle": row["handle"], "user_id": row["id"]})
 
+    @app.post("/api/logout")
+    def logout():
+        session.clear()
+        return jsonify({"ok": True})
+
     @app.post("/api/rumors")
     def post_rumor():
         if not session.get("user_id"):
