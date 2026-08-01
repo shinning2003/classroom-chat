@@ -980,6 +980,38 @@ def create_app(config=None):
         conn.close()
         return jsonify({"ok": True, "banned": uid})
 
+    # TEMP: pre-launch cleanup endpoint — REMOVE after use
+    @app.post("/api/admin/_reset")
+    def admin_reset():
+        if not session.get("admin"):
+            return jsonify({"error": "Unauthorized."}), 401
+        payload = request.get_json(silent=True) or {}
+        dry = bool(payload.get("dry_run"))
+        conn = get_db()
+        out = {}
+        if dry:
+            out["users"] = [dict(r) for r in exec(conn,
+                "SELECT id, handle, real_name, email FROM users ORDER BY id").fetchall()]
+        for t in ["room_messages", "rumors", "reactions", "me_too", "comments",
+                  "conversation_participants", "messages", "conversations",
+                  "rumor_tags", "tag_follows", "tags", "purchases",
+                  "challenge_claims", "push_subs"]:
+            try:
+                n = exec(conn, f"SELECT COUNT(*) AS n FROM {t}").fetchone()["n"]
+                if not dry:
+                    exec(conn, f"DELETE FROM {t}")
+                out[t] = n
+            except Exception as e:
+                out[t] = f"ERR {e}"
+        n_users = exec(conn, "SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+        out["users_count"] = n_users
+        if not dry and payload.get("wipe_users"):
+            exec(conn, "DELETE FROM users")
+            out["users_deleted"] = n_users
+        conn.commit()
+        conn.close()
+        return jsonify(out)
+
     @app.get("/api/admin/chat")
     def admin_chat():
         """Live group-chat moderation feed (newest first)."""
