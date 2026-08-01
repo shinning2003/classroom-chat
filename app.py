@@ -992,9 +992,9 @@ def create_app(config=None):
         if dry:
             out["users"] = [dict(r) for r in exec(conn,
                 "SELECT id, handle, real_name, email FROM users ORDER BY id").fetchall()]
-        for t in ["room_messages", "rumors", "reactions", "me_too", "comments",
+        for t in ["reactions", "me_too", "comments", "rumor_tags", "tag_follows",
                   "conversation_participants", "messages", "conversations",
-                  "rumor_tags", "tag_follows", "tags", "purchases",
+                  "room_messages", "rumors", "tags", "purchases",
                   "challenge_claims", "push_subs"]:
             try:
                 n = exec(conn, f"SELECT COUNT(*) AS n FROM {t}").fetchone()["n"]
@@ -1003,6 +1003,10 @@ def create_app(config=None):
                 out[t] = n
             except Exception as e:
                 out[t] = f"ERR {e}"
+                if not dry:
+                    conn.rollback()
+                    conn.close()
+                    return jsonify({"error": "wipe aborted", "table": t, "detail": str(e)}), 500
         n_users = exec(conn, "SELECT COUNT(*) AS n FROM users").fetchone()["n"]
         out["users_count"] = n_users
         if not dry and payload.get("wipe_users"):
