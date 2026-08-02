@@ -1309,16 +1309,20 @@ def create_app(config=None):
             (now_iso,)).fetchall()
 
         def msg(r):
+            # Room is anonymous: only the viewer's own messages carry a
+            # handle; everyone else is shown as "anonymous" (no handle, no
+            # name color) so nothing leaks through the API either.
+            mine = r["user_id"] == session.get("user_id")
             return {
                 "id": r["id"],
                 "sender_id": r["user_id"],
-                "sender_handle": r["handle"],
+                "sender_handle": r["handle"] if mine else "anonymous",
                 "text": r["text"],
                 "created_at": r["created_at"],
                 "highlighted": bool(r["highlighted"]),
                 "is_incognito": bool(r["is_incognito"]),
                 "pinned_until": r["pinned_until"],
-                "name_color": r["name_color"],
+                "name_color": r["name_color"] if mine else None,
             }
 
         pinned = [msg(r) for r in pins]

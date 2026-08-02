@@ -666,9 +666,8 @@ function renderMessage(m){
   if(m.pinned_until) cls.push('msg-pinned');
   let sender = '';
   if(!isMine){
-    const name = m.is_incognito ? '👻 someone' : '@' + escHtml(m.sender_handle);
-    const style = (!m.is_incognito && m.name_color) ? ` style="color:${escHtml(m.name_color)};font-weight:600"` : '';
-    sender = `<div class="sender"${style}>${name}</div>`;
+    // Anonymous room: everyone else is just "anonymous"
+    sender = `<div class="sender">anonymous</div>`;
   }
   const pinMark = m.pinned_until ? ' 📌' : '';
   return `<div class="${cls.join(' ')}">${sender}<div>${escHtml(m.text)}${pinMark}</div><div class="time">${timeAgo(m.created_at)}</div></div>`;
