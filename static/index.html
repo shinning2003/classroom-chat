@@ -176,6 +176,21 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
   </div>
 </div>
 
+<!-- First-time welcome modal (shown only right after registration) -->
+<div class="modal-overlay hidden" id="welcome-modal" style="z-index:300">
+  <div class="modal" style="text-align:center;max-width:440px">
+    <div style="font-size:44px;margin-bottom:8px">🎓</div>
+    <h2 style="margin:0 0 4px">Welcome to the B.Sc. Computer Science Class!</h2>
+    <p style="color:var(--muted);font-size:13px;margin:0 0 16px">Here are the house rules:</p>
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:14px 16px;text-align:left;margin-bottom:18px">
+      <div style="display:flex;gap:10px;margin-bottom:10px"><span style="font-size:18px">🙊</span><div><b>Rule 1</b> — Don't tell your name in the chat.</div></div>
+      <div style="display:flex;gap:10px;margin-bottom:10px"><span style="font-size:18px">💘</span><div><b>Rule 2</b> — You can tell who you love, or who you have a crush on in our class.</div></div>
+      <div style="display:flex;gap:10px"><span style="font-size:18px">😄</span><div><b>Rule 3</b> — Enjoy chatting to your classmates anonymously.</div></div>
+    </div>
+    <button class="btn btn-primary" onclick="closeWelcome()" style="width:100%">Got it — let's chat!</button>
+  </div>
+</div>
+
 <div id="app" class="hidden">
   <div id="app-header">
     <h2>💬 Whisper Room</h2>
@@ -347,8 +362,12 @@ async function register(){
     });
     toast('Registered!');
     enterApp(d.handle);
+    showWelcome();  // first-time welcome with class rules
   } catch(e){ toast(e.message, true); }
 }
+
+function showWelcome(){ $('welcome-modal').classList.remove('hidden'); }
+function closeWelcome(){ $('welcome-modal').classList.add('hidden'); }
 
 async function login(){
   try {
