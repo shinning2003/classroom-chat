@@ -180,6 +180,8 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
   <div id="app-header">
     <h2>💬 Whisper Room</h2>
     <div class="user-info">
+      <span id="header-online" title="Online now" style="color:#22c55e;font-size:12px">🟢 <span id="online-count">0</span> online</span>
+      <span style="margin:0 6px;color:var(--muted)">·</span>
       <span id="header-bell" title="Enable notifications" style="cursor:pointer;font-size:14px;opacity:.45" onclick="togglePush()">🔔</span>
       <span id="header-handle"></span>
       <span style="margin:0 6px;color:var(--muted)">·</span>
@@ -447,6 +449,7 @@ function startRoomPolling(){
 async function loadRoom(){
   try {
     const d = await api('GET', '/api/feed');
+    if(d.online !== undefined) $('online-count').textContent = d.online;
     const el = $('room-msgs');
     const msgs = d.messages || [];
     const pins = d.pinned || [];

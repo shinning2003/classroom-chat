@@ -54,6 +54,15 @@ def create_app(config=None):
         if row is None or row["banned"]:
             session.pop("user_id", None)
             return jsonify({"error": "Account removed."}), 403
+        # Presence heartbeat: refresh last_seen at most once per 30s so an
+        # active user is counted as online without writing on every poll.
+        now = datetime.now(timezone.utc)
+        exec(conn,
+            "UPDATE users SET last_seen=? WHERE id=? "
+            "AND (last_seen IS NULL OR last_seen < ?)",
+            (now.isoformat(), uid,
+             (now - timedelta(seconds=30)).isoformat()))
+        conn.commit()
 
     @app.teardown_appcontext
     def close_db(exc=None):
@@ -1327,8 +1336,16 @@ def create_app(config=None):
 
         pinned = [msg(r) for r in pins]
         msgs = [msg(r) for r in reversed(rows)]
+        # Online count: users whose presence heartbeat is fresh (last 2 min).
+        # The 2s room poll keeps viewers' last_seen current, so this tracks
+        # people actively in the app.
+        online = exec(conn,
+            "SELECT COUNT(*) AS n FROM users "
+            "WHERE last_seen IS NOT NULL AND last_seen >= ?",
+            ((datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(),)
+        ).fetchone()["n"]
         conn.close()
-        return jsonify({"messages": msgs, "pinned": pinned})
+        return jsonify({"messages": msgs, "pinned": pinned, "online": online})
 
     @app.get("/api/feed/mine")
     def my_room_messages():
@@ -1938,7 +1955,8 @@ def init_db(db_path=None, conn=None):
                 handle TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 banned INTEGER NOT NULL DEFAULT 0,
-                points INTEGER NOT NULL DEFAULT 0
+                points INTEGER NOT NULL DEFAULT 0,
+                last_seen TEXT
             )"""
         )
         conn.execute(
@@ -2041,7 +2059,8 @@ def init_db(db_path=None, conn=None):
                          ("name_color", "TEXT"),
                          ("name_color_until", "TEXT"),
                          ("streak_shield", "INTEGER NOT NULL DEFAULT 0"),
-                         ("boost_until", "TEXT")]:
+                         ("boost_until", "TEXT"),
+                         ("last_seen", "TEXT")]:
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
             except Exception:
@@ -2127,7 +2146,8 @@ def init_db(db_path=None, conn=None):
                 handle TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 banned INTEGER NOT NULL DEFAULT 0,
-                points INTEGER NOT NULL DEFAULT 0
+                points INTEGER NOT NULL DEFAULT 0,
+                last_seen TEXT
             )"""
         )
         # Self-heal: add email column if it's missing.
@@ -2148,7 +2168,8 @@ def init_db(db_path=None, conn=None):
                          ("name_color", "TEXT"),
                          ("name_color_until", "TEXT"),
                          ("streak_shield", "INTEGER NOT NULL DEFAULT 0"),
-                         ("boost_until", "TEXT")]:
+                         ("boost_until", "TEXT"),
+                         ("last_seen", "TEXT")]:
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {typ}")
             except Exception:
