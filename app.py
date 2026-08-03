@@ -1438,7 +1438,7 @@ def create_app(config=None):
                 subs = [{"endpoint": r["endpoint"], "keys": json.loads(r["keys"])}
                         for r in rows]
                 payload = json.dumps({
-                    "title": "💬 Whisper Room",
+                    "title": "💬 Classroom Chat",
                     "body": f"@{handle}: {text[:80]}",
                     "tag": "room",
                     "url": "/",

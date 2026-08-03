@@ -1,5 +1,5 @@
-/* Whisper Room service worker — app-shell cache + push notifications */
-const CACHE = 'whisper-v1';
+/* Classroom Chat service worker — app-shell cache + push notifications */
+const CACHE = 'classroom-v1';
 const SHELL = [
   '/',
   '/manifest.json',
@@ -38,7 +38,7 @@ self.addEventListener('fetch', (e) => {
 });
 
 self.addEventListener('push', (e) => {
-  let data = { title: '💬 Whisper Room', body: 'New message in the room', tag: 'room', url: '/' };
+  let data = { title: '💬 Classroom Chat', body: 'New message in the room', tag: 'room', url: '/' };
   if (e.data) {
     try { data = Object.assign(data, e.data.json()); } catch (_) { data.body = e.data.text(); }
   }

@@ -1,6 +1,6 @@
 {
-  "name": "Whisper Room",
-  "short_name": "Whisper",
+  "name": "Classroom Chat",
+  "short_name": "Classroom",
   "description": "Anonymous confessions & group chat for the batch.",
   "start_url": "/",
   "scope": "/",

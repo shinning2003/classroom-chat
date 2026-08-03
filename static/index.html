@@ -10,7 +10,7 @@
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/static/icons/icon-192.png">
 <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
-<title>Whisper Room</title>
+<title>Classroom Chat</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#0a0f1a;--surface:#111827;--surface2:#1a2332;--accent:#00d4ff;--accent-glow:#00d4ff33;--text:#e2e8f0;--muted:#64748b;--border:#1e293b;--radius:10px;--danger:#ef4444;}
@@ -56,8 +56,10 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
 
 /* Compose */
 /* Group room (feed = chat) */
-#room-area{display:flex;flex-direction:column;height:calc(100vh - 130px)}
+#room-area{display:flex;flex-direction:column;height:calc(100vh - 130px);position:relative}
 #room-msgs{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+#new-msg-btn{position:absolute;bottom:64px;right:16px;z-index:60;background:var(--accent);color:#fff;border:none;border-radius:999px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.35);display:flex;align-items:center;gap:6px}
+#new-msg-btn:hover{filter:brightness(1.1)}
 #room-input-area{display:flex;gap:8px;padding:8px 12px;background:var(--surface);border-top:1px solid var(--border)}
 #room-input-area input{flex:1}
 
@@ -144,12 +146,12 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
 <body>
 
 <div id="splash">
-  <h1>💬 Whisper Room</h1>
+  <h1>💬 Classroom Chat</h1>
   <div class="spinner"></div>
 </div>
 
 <div id="auth-screen" class="hidden">
-  <h1>Whisper Room</h1>
+  <h1>Classroom Chat</h1>
   <p class="sub">Anonymous confessions. Real accountability.</p>
   <div class="auth-card" id="login-form">
     <h2>Sign In</h2>
@@ -193,7 +195,7 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
 
 <div id="app" class="hidden">
   <div id="app-header">
-    <h2>💬 Whisper Room</h2>
+    <h2>💬 Classroom Chat</h2>
     <div class="user-info">
       <span id="header-online" title="Online now" style="color:#22c55e;font-size:12px">🟢 <span id="online-count">0</span> online</span>
       <span style="margin:0 6px;color:var(--muted)">·</span>
@@ -210,6 +212,7 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
     <div class="tab-content active" id="tab-feed">
       <div id="room-area">
         <div id="room-msgs"></div>
+        <button id="new-msg-btn" class="hidden" onclick="goToLatest()">↓ New messages</button>
         <div id="room-input-area">
           <input id="room-input" placeholder="Message the group…" maxlength="500" onkeydown="if(event.key==='Enter')sendRoomMsg()">
           <button class="btn btn-sm btn-primary" onclick="sendRoomMsg()">Send</button>
@@ -461,9 +464,16 @@ let profileTick = null;
 
 function startRoomPolling(){
   if(roomPollTimer) return;
+  // Hide the "new messages" bubble as soon as the user scrolls back down
+  $('room-msgs').addEventListener('scroll', () => {
+    const el = $('room-msgs');
+    if(el.scrollHeight - el.scrollTop - el.clientHeight < 80) hideNewMsgBtn();
+  });
   loadRoom();
   roomPollTimer = setInterval(loadRoom, 2000);
 }
+
+let roomMsgCount = 0;   // last rendered message count (new-msg detection)
 
 async function loadRoom(){
   try {
@@ -474,12 +484,36 @@ async function loadRoom(){
     const pins = d.pinned || [];
     if(!msgs.length && !pins.length){
       if(!el.querySelector('.empty-state')) el.innerHTML = '<div class="empty-state" style="padding:20px">No messages yet. Say hello! 👋</div>';
+      roomMsgCount = 0;
+      hideNewMsgBtn();
       return;
     }
+    const total = pins.length + msgs.length;
+    const gotNew = total > roomMsgCount;
+    // Were we already at the bottom before this render? If yes, keep
+    // pinned to the latest; if no (user is reading old messages), do NOT
+    // yank the scroll — show a "new messages" button instead.
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const prevScroll = el.scrollTop;
     const pinHtml = pins.length ? '<div class="pinned-banner">📌 Pinned</div>' + pins.map(renderMessage).join('') : '';
     el.innerHTML = pinHtml + msgs.map(renderMessage).join('');
-    el.scrollTop = el.scrollHeight;
+    if(nearBottom){
+      el.scrollTop = el.scrollHeight;
+      hideNewMsgBtn();
+    } else {
+      el.scrollTop = prevScroll;          // preserve reading position
+      if(gotNew) showNewMsgBtn();         // new msg while reading history
+    }
+    roomMsgCount = total;
   } catch(e){ authKick(e); }
+}
+
+function showNewMsgBtn(){ const b = $('new-msg-btn'); if(b) b.classList.remove('hidden'); }
+function hideNewMsgBtn(){ const b = $('new-msg-btn'); if(b) b.classList.add('hidden'); }
+function goToLatest(){
+  const el = $('room-msgs');
+  el.scrollTop = el.scrollHeight;
+  hideNewMsgBtn();
 }
 
 async function sendRoomMsg(){
