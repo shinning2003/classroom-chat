@@ -1,5 +1,5 @@
 /* Classroom Chat service worker — app-shell cache + push notifications */
-const CACHE = 'classroom-v1';
+const CACHE = 'classroom-v2';
 const SHELL = [
   '/',
   '/manifest.json',

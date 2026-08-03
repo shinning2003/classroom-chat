@@ -190,6 +190,17 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
   </div>
 </div>
 
+<!-- Update-available modal (shown on app open when a newer version is live) -->
+<div class="modal-overlay hidden" id="update-modal" style="z-index:300">
+  <div class="modal" style="text-align:center;max-width:400px">
+    <div style="font-size:44px;margin-bottom:8px">🔄</div>
+    <h2 style="margin:0 0 4px">Update available!</h2>
+    <p style="color:var(--muted);font-size:13px;margin:0 0 16px">A new version of Classroom Chat is live. Update now to get the latest fixes and features.</p>
+    <button class="btn btn-primary" onclick="updateApp()" style="width:100%;margin-bottom:8px">🔄 Update now</button>
+    <button class="btn" onclick="closeUpdateModal()" style="width:100%">Maybe later</button>
+  </div>
+</div>
+
 <div id="app" class="hidden">
   <div id="app-header">
     <h2>💬 Classroom Chat</h2>
@@ -322,14 +333,22 @@ async function installApp(){
 /* --- Update app (server version vs last-seen version) --- */
 function checkAppVersion(v){
   const KEY = 'cc_app_version';
-  const b = $('upd-app-btn');
-  if(!v || !b) return;
+  if(!v) return;
   const seen = localStorage.getItem(KEY);
   if(seen !== null && seen !== v){
-    b.style.display = '';
+    // Newer version is live — nudge immediately, no need to open Profile.
+    const b = $('upd-app-btn');
+    if(b) b.style.display = '';
+    const m = $('update-modal');
+    if(m) m.classList.remove('hidden');
   }
-  // Remember the version we're now running on so the next bump shows the button
+  // Remember the version we've now been told about so the next bump shows
+  // the prompt again (one nudge per version).
   localStorage.setItem(KEY, v);
+}
+
+function closeUpdateModal(){
+  $('update-modal').classList.add('hidden');
 }
 
 async function updateApp(){
@@ -340,6 +359,7 @@ async function updateApp(){
       const reg = await navigator.serviceWorker.ready;
       await reg.update();
     }
+    $('update-modal').classList.add('hidden');
     toast('Updating… reloading in a moment.');
     setTimeout(() => location.reload(), 800);
   }catch(e){
