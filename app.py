@@ -1363,7 +1363,10 @@ def create_app(config=None):
                 }).encode("utf-8")
                 import threading
                 threading.Thread(target=_push_to_all,
-                                 args=(subs, payload), daemon=True).start()
+                                 args=(subs, payload,
+                                       app.config.get("VAPID_PRIVATE_KEY") or "",
+                                       app.config.get("VAPID_SUBJECT") or ""),
+                                 daemon=True).start()
         except Exception:
             pass  # push is best-effort; never break message posting
         conn.close()
@@ -2372,13 +2375,15 @@ def _count(conn, sql, params):
         return 0
 
 
-def _push_to_all(subscriptions, payload):
+def _push_to_all(subscriptions, payload, priv, subj):
     """Send a push payload to a list of subscriptions (HTTP only — never
     touches the DB, safe to run in a thread). Best-effort: failures are
-    swallowed; expired subscriptions (404/410) are simply skipped."""
-    from flask import current_app
-    priv = current_app.config.get("VAPID_PRIVATE_KEY") or ""
-    subj = current_app.config.get("VAPID_SUBJECT") or ""
+    swallowed; expired subscriptions (404/410) are simply skipped.
+
+    Runs on a bare daemon thread with NO Flask app context, so the VAPID
+    config values are passed in explicitly by the caller — current_app
+    would raise 'Working outside of application context'.
+    """
     if not priv:
         return
     try:
