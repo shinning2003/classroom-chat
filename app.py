@@ -525,20 +525,11 @@ def create_app(config=None):
                          (uid,)).fetchone()
             shield = exec(conn, "SELECT streak_shield FROM users WHERE id=?",
                           (uid,)).fetchone()
-            ncol = exec(conn,
-                        "SELECT name_color, name_color_until FROM users WHERE id=?",
-                        (uid,)).fetchone()
             conn.close()
-            name_color = None
-            if ncol and ncol["name_color"] and ncol["name_color_until"] \
-                    and ncol["name_color_until"] > now_iso:
-                name_color = ncol["name_color"]
             me = {
                 "boost_active": bool(boost and boost["boost_until"]
                                      and boost["boost_until"] > now_iso),
                 "streak_shield": shield["streak_shield"] if shield else 0,
-                "name_color": name_color,
-                "palette": NAME_COLORS,
             }
         return jsonify({"items": items, "me": me})
 
@@ -564,8 +555,6 @@ def create_app(config=None):
             return jsonify({"error": "Login required."}), 401
         p = request.get_json(silent=True) or {}
         kind = (p.get("kind") or "").strip()
-        rumor_id = p.get("rumor_id")
-        alias = (p.get("alias") or "").strip()
 
         if kind not in SHOP_ITEMS:
             return jsonify({"error": "Unknown item."}), 400
@@ -585,37 +574,8 @@ def create_app(config=None):
         now = datetime.now(timezone.utc).isoformat()
 
         # Validate and apply
-        if kind == "alias":
-            if not alias:
-                conn.close()
-                return jsonify({"error": "Alias text required."}), 400
-            if len(alias) > 30:
-                conn.close()
-                return jsonify({"error": "Alias too long (max 30 chars)."}), 400
-            exec(conn, "UPDATE users SET custom_alias=? WHERE id=?",
-                 (alias, uid))
-            exec(conn,
-                 "INSERT INTO purchases (user_id, kind, meta, created_at) "
-                 "VALUES (?, ?, ?, ?)",
-                 (uid, kind, alias, now))
-
-        elif kind == "name_color":
-            color = (p.get("color") or "").strip().lower()
-            match = next((c for c in NAME_COLORS if c.lower() == color), None)
-            if not match:
-                conn.close()
-                return jsonify({"error": "Pick a color from the palette."}), 400
-            expires = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
-            exec(conn,
-                 "UPDATE users SET name_color=?, name_color_until=? WHERE id=?",
-                 (match, expires, uid))
-            exec(conn,
-                 "INSERT INTO purchases (user_id, kind, meta, created_at, expires_at) "
-                 "VALUES (?, ?, ?, ?, ?)",
-                 (uid, kind, match, now, expires))
-
-        elif kind in MESSAGE_ITEMS:
-            # highlight / ghost / pin target one of your own room messages
+        if kind in MESSAGE_ITEMS:
+            # highlight / pin target one of your own room messages
             message_id = p.get("message_id") or p.get("rumor_id")
             if not message_id:
                 conn.close()
@@ -629,10 +589,6 @@ def create_app(config=None):
             if kind == "highlight":
                 exec(conn,
                      "UPDATE room_messages SET highlighted=1, is_incognito=0 "
-                     "WHERE id=?", (message_id,))
-            elif kind == "ghost":
-                exec(conn,
-                     "UPDATE room_messages SET is_incognito=1, highlighted=0 "
                      "WHERE id=?", (message_id,))
             elif kind == "pin":
                 # One active pin per user: retire old pins, pin for 24h
@@ -667,64 +623,21 @@ def create_app(config=None):
         elif kind == "mystery_box":
             import random as _rnd
             roll = _rnd.random()
-            prize_label, prize_pts, prize_kind = "30 pts", 30, "pts"
+            prize_label, prize_pts = "30 pts", 30
             cum = 0.0
             for weight, pts, label in MYSTERY_PRIZES:
                 cum += weight
                 if roll <= cum:
                     prize_pts, prize_label = pts, label
-                    prize_kind = "pts" if pts else "badge"
                     break
-            if prize_kind == "pts":
-                exec(conn,
-                     "UPDATE users SET points_awarded = COALESCE(points_awarded,0) + ? "
-                     "WHERE id=?", (prize_pts, uid))
-            else:
-                # Free random flair badge; if they own all, fall back to 150 pts
-                owned = {r["meta"] for r in exec(conn,
-                    "SELECT meta FROM purchases WHERE user_id=? AND kind='badge'",
-                    (uid,)).fetchall()}
-                avail = [k for k in SHOP_ITEMS
-                         if k.startswith("badge_") and k not in owned]
-                if avail:
-                    prize_kind = "badge"
-                    pick = _rnd.choice(avail)
-                    prize_label = SHOP_ITEMS[pick][0]
-                    exec(conn,
-                         "INSERT INTO purchases (user_id, kind, meta, created_at) "
-                         "VALUES (?, ?, ?, ?)",
-                         (uid, "badge", pick, now))
-                else:
-                    prize_pts = 150
-                    prize_label = "150 pts"
-                    exec(conn,
-                         "UPDATE users SET points_awarded = COALESCE(points_awarded,0) + ? "
-                         "WHERE id=?", (prize_pts, uid))
+            exec(conn,
+                 "UPDATE users SET points_awarded = COALESCE(points_awarded,0) + ? "
+                 "WHERE id=?", (prize_pts, uid))
             exec(conn,
                  "INSERT INTO purchases (user_id, kind, meta, created_at) "
                  "VALUES (?, ?, ?, ?)",
                  (uid, kind, f"won {prize_label}", now))
             prize_out = f"You won {prize_label}!"
-
-        elif kind == "featured":
-            expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-            exec(conn,
-                 "INSERT INTO purchases (user_id, kind, created_at, expires_at) "
-                 "VALUES (?, ?, ?, ?)",
-                 (uid, kind, now, expires))
-
-        elif kind.startswith("badge_"):
-            # Purchasable flair badge — check not already owned
-            existing = exec(conn,
-                "SELECT 1 FROM purchases WHERE user_id=? AND kind='badge' AND meta=?",
-                (uid, kind)).fetchone()
-            if existing:
-                conn.close()
-                return jsonify({"error": "You already own this badge."}), 400
-            exec(conn,
-                 "INSERT INTO purchases (user_id, kind, meta, created_at) "
-                 "VALUES (?, ?, ?, ?)",
-                 (uid, "badge", kind, now))
 
         # Deduct points
         exec(conn,
@@ -2386,40 +2299,33 @@ CHALLENGE_DEFS = [
     ("daily_3", "Post 3 messages today", 3, 30, "daily"),
 ]
 
-# Name-color whitelist (never render arbitrary CSS from the client).
-NAME_COLORS = ["#FF6B6B", "#FFA94D", "#FFD43B", "#69DB7C", "#4DABF7",
-               "#9775FA", "#F783AC", "#20C997", "#FF922B", "#748FFC"]
-
-# Mystery Box prize table: (cumulative weight, pts, label). 96% points,
-# 4% a free purchasable flair badge.
+# Mystery Box prize table: (cumulative weight, pts, label). Points only —
+# the old "free flair badge" prize is gone (badges are invisible to other
+# users in the anonymous room, so a badge prize was worthless).
 MYSTERY_PRIZES = [
     (0.40, 30, "30 pts"),
     (0.25, 60, "60 pts"),
     (0.15, 100, "100 pts"),
     (0.10, 150, "150 pts"),
-    (0.06, 250, "250 pts"),
-    (0.04, 0, "BADGE"),
+    (0.10, 250, "250 pts"),
 ]
 
 # Shop: item key -> (label, description, price).
+# Identity/flair items (alias, name_color, ghost, featured, badges) were
+# removed: the room shows every other user as "anonymous", so anything that
+# decorated a handle or profile was invisible to everyone else — a dead
+# point-sink. Only items that are actually visible/functional for others
+# (message effects) or the buyer (boosts) remain.
 SHOP_ITEMS = {
-    "alias": ("✏️ Custom Alias", "Set a custom display name on your messages (max 30 chars)", 80),
-    "name_color": ("🎨 Name Color", "Colored handle in the room for 30 days", 60),
     "highlight": ("✨ Highlight Message", "Glowing border on one of your room messages", 50),
-    "ghost": ("👻 Ghost Message", "One room message with no handle — ghost mode", 150),
     "pin": ("📌 Pin to Top", "Pin one of your messages to the top of the room for 24h", 100),
     "streak_shield": ("🧊 Streak Shield", "Survives one missed day without breaking your streak", 80),
     "boost": ("🚀 Double Points", "2× points on every post for the next 24h", 120),
-    "mystery_box": ("🎁 Mystery Box", "Random prize: 30–250 pts or a free flair badge", 90),
-    "featured": ("👑 Featured Spot", "Featured badge on your profile for 1 week", 200),
-    "badge_smooth": ("Smooth Talker 🎩", "Equip the Smooth Talker badge as your flair", 100),
-    "badge_mystery": ("Mystery Guest 🎭", "Equip the Mystery Guest badge as your flair", 150),
-    "badge_veteran": ("Veteran 👑", "Equip the Veteran badge as your flair", 200),
-    "badge_crown": ("Crown Royal 👑", "Equip the Crown Royal badge as your flair", 300),
+    "mystery_box": ("🎁 Mystery Box", "Random prize: 30–250 pts", 90),
 }
 
 # Items that target one of your own room messages.
-MESSAGE_ITEMS = {"highlight", "ghost", "pin"}
+MESSAGE_ITEMS = {"highlight", "pin"}
 
 
 def _current_week():
@@ -2533,7 +2439,11 @@ def _compute_points(conn, user_id):
 
 
 def _compute_badges(conn, user_id):
-    """Return unlocked badges (list of {key,label}) — earned + purchased."""
+    """Return unlocked badges (list of {key,label}) — earned milestones only.
+
+    Purchased flair badges were removed from the shop: in the anonymous room
+    they were invisible to everyone else, so they no longer exist.
+    """
     posts = _count(conn, "SELECT COUNT(*) FROM rumors WHERE user_id=?",
                    (user_id,))
     room_posts = _count(conn, "SELECT COUNT(*) FROM room_messages WHERE user_id=?",
@@ -2542,15 +2452,6 @@ def _compute_badges(conn, user_id):
     for key, label, threshold in BADGE_DEFS:
         if posts + room_posts >= threshold:
             out.append({"key": key, "label": label})
-    # Include purchased flair badges
-    rows = exec(conn,
-        "SELECT meta FROM purchases WHERE user_id=? AND kind='badge'",
-        (user_id,)).fetchall()
-    for r in rows:
-        k = r[0] if not hasattr(r, "keys") else r["meta"]
-        if k in SHOP_ITEMS:
-            label = SHOP_ITEMS[k][0]
-            out.append({"key": k, "label": label})
     return out
 
 
