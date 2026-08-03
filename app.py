@@ -16,6 +16,10 @@ from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request, session, current_app, g
 from werkzeug.security import generate_password_hash, check_password_hash
 
+# Bump this on every release — /api/me exposes it so the app can show an
+# "Update available" button to users still on an older build.
+APP_VERSION = "1.0.0"
+
 
 def create_app(config=None):
     app = Flask(__name__)
@@ -348,7 +352,8 @@ def create_app(config=None):
                         "boost_active": boost_active,
                         "streak_shield": shield_n,
                         "name_color": name_color,
-                        "recent_bumped": recent_bumped_out})
+                        "recent_bumped": recent_bumped_out,
+                        "app_version": APP_VERSION})
 
     # --- Reward system: challenges, leaderboard (anonymized) ---
     @app.get("/api/challenges")

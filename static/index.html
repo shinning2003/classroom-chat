@@ -230,6 +230,10 @@ textarea{resize:vertical;min-height:60px;font-family:inherit}
     <div class="tab-content" id="tab-profile">
       <h3 style="margin-bottom:10px;font-size:16px">👤 Profile</h3>
       <div id="profile-area"></div>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
+        <button class="btn btn-sm btn-primary" id="dl-app-btn" onclick="installApp()">📲 Download app</button>
+        <button class="btn btn-sm" id="upd-app-btn" onclick="updateApp()" style="display:none;border-color:var(--accent);color:var(--accent)">🔄 Update available — tap to install</button>
+      </div>
       <h3 style="margin:16px 0 10px;font-size:16px">🏪 Shop</h3>
       <div id="shop"></div>
     </div>
@@ -286,6 +290,70 @@ function authKick(e){
 // Register the service worker (app installability + push delivery)
 if('serviceWorker' in navigator){
   navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+
+/* --- Download app (PWA install) --- */
+let deferredPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  const b = $('dl-app-btn');
+  if(b){ b.textContent = '📲 Download app'; b.disabled = false; }
+});
+window.addEventListener('appinstalled', () => { deferredPrompt = null; toast('App installed! 🎉'); });
+
+function isStandalone(){
+  return window.matchMedia('(display-mode: standalone)').matches
+      || window.navigator.standalone === true;
+}
+
+async function installApp(){
+  const b = $('dl-app-btn');
+  if(deferredPrompt){
+    deferredPrompt.prompt();
+    const choice = await deferredPrompt.userChoice.catch(() => ({ outcome: 'dismissed' }));
+    deferredPrompt = null;
+    if(b) b.textContent = choice.outcome === 'accepted' ? '✅ Installed' : '📲 Download app';
+  } else if(isStandalone()){
+    toast('App is already installed. 📱', false);
+  } else {
+    // No install prompt available (e.g. iOS Safari) — teach the manual path
+    toast('iOS? Use Share → "Add to Home Screen". Android/Chrome: menu → "Install app".');
+  }
+}
+
+/* --- Update app (server version vs last-seen version) --- */
+function checkAppVersion(v){
+  const KEY = 'cc_app_version';
+  const b = $('upd-app-btn');
+  if(!v || !b) return;
+  const seen = localStorage.getItem(KEY);
+  if(seen !== null && seen !== v){
+    b.style.display = '';
+  }
+  // Remember the version we're now running on so the next bump shows the button
+  localStorage.setItem(KEY, v);
+}
+
+async function updateApp(){
+  try{
+    // Force the service worker to re-fetch sw.js; new SW activates with
+    // skipWaiting + claims clients, then reload picks up the fresh shell.
+    if('serviceWorker' in navigator){
+      const reg = await navigator.serviceWorker.ready;
+      await reg.update();
+    }
+    toast('Updating… reloading in a moment.');
+    setTimeout(() => location.reload(), 800);
+  }catch(e){
+    toast('Update failed: ' + e.message, true);
+  }
+}
+
+// On startup: hide Download if already running as an installed app.
+if(isStandalone()){
+  const b = $('dl-app-btn');
+  if(b) b.style.display = 'none';
 }
 
 function urlBase64ToUint8Array(b64){
@@ -554,6 +622,7 @@ async function loadProfile(){
     }
     html += '</div>';
     $('profile-area').innerHTML = html;
+    checkAppVersion(d.app_version);
   } catch(e){ authKick(e); }
 }
 
